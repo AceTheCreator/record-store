@@ -32,38 +32,38 @@ license = "Apache-2.0"
 authors = ["Record Store contributors"]
 
 [workspace.dependencies]
-aes-gcm = "0.10.3"
+aes-gcm = "0.11.1"
 anyhow = "1.0.99"
-argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "password-hash"] }
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "password-hash"] }
 async-trait = "0.1.89"
 axum = "0.8.4"
 base64 = "0.22.1"
 bytes = "1.10.1"
 chrono = { version = "0.4.41", features = ["serde"] }
 clap = { version = "4.5.47", features = ["derive", "env"] }
-criterion = { version = "0.7.0", features = ["async_tokio"] }
+criterion = { version = "0.8.2", features = ["async_tokio"] }
 futures-core = "0.3.31"
 futures-util = "0.3.31"
 fs2 = "0.4.3"
 getrandom = "0.4.3"
 hex = "0.4.3"
-hkdf = "0.12.4"
-hmac = "0.12.1"
+hkdf = "0.13.0"
+hmac = "0.13.0"
 http = "1.3.1"
 http-body-util = "0.1.3"
-md-5 = "0.10.6"
+md-5 = "0.11.0"
 openraft = { version = "0.9.25", features = ["serde", "storage-v2"] }
 percent-encoding = "2.3.1"
-prost = "0.13.5"
+prost = "0.14.4"
 proptest = "1.9.0"
 protoc-bin-vendored = "3.2.0"
 redb = "2.6.3"
 reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls"] }
-quick-xml = { version = "0.41.0", features = ["serialize"] }
+quick-xml = { version = "0.42.0", features = ["serialize"] }
 reed-solomon-simd = "3.1.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.143"
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 subtle = "2.6.1"
 tempfile = "3.21.0"
 wiremock = "0.6.5"
@@ -72,8 +72,9 @@ tokio = { version = "1.47.1", features = ["fs", "io-util", "macros", "net", "pro
 tokio-stream = { version = "0.1.17", features = ["net"] }
 tokio-util = { version = "0.7.16", features = ["io", "rt"] }
 toml = "0.9.5"
-tonic = { version = "0.13.1", default-features = false, features = ["codegen", "prost", "router", "tls-ring", "transport"] }
-tonic-build = "0.13.1"
+tonic = { version = "0.14.6", default-features = false, features = ["codegen", "router", "tls-ring", "transport"] }
+tonic-prost = "0.14.6"
+tonic-prost-build = "0.14.6"
 tower = { version = "0.5.2", features = ["util"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "json"] }

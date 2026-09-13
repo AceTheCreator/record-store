@@ -2,10 +2,7 @@
 
 use std::{collections::BTreeMap, net::IpAddr, path::Path, sync::Arc, time::Duration};
 
-use aes_gcm::{
-    Aes256Gcm, KeyInit, Nonce,
-    aead::{Aead, OsRng, rand_core::RngCore},
-};
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
@@ -377,7 +374,7 @@ impl RedbEventRepository {
         let secret = self.decrypt_secret(&subscription.encrypted_secret)?;
         let payload = serde_json::to_vec(&event)?;
         let mut signer =
-            <Hmac<Sha256> as Mac>::new_from_slice(&secret).map_err(|_| EventError::Crypto)?;
+            <Hmac<Sha256> as KeyInit>::new_from_slice(&secret).map_err(|_| EventError::Crypto)?;
         signer.update(&payload);
         let signature = format!("sha256={}", hex::encode(signer.finalize().into_bytes()));
         let attempt = pending.attempts.saturating_add(1);
@@ -446,9 +443,9 @@ impl RedbEventRepository {
     fn encrypt_secret(&self, secret: &[u8]) -> Result<EncryptedSecret, EventError> {
         let cipher = self.cipher.as_ref().ok_or(EventError::MasterKeyRequired)?;
         let mut nonce = [0_u8; 12];
-        OsRng.fill_bytes(&mut nonce);
+        getrandom::fill(&mut nonce).map_err(|_| EventError::Crypto)?;
         let ciphertext = cipher
-            .encrypt(Nonce::from_slice(&nonce), secret)
+            .encrypt(&Nonce::from(nonce), secret)
             .map_err(|_| EventError::Crypto)?;
         Ok(EncryptedSecret {
             format_version: 1,
@@ -462,11 +459,15 @@ impl RedbEventRepository {
             return Err(EventError::UnsupportedSecretFormat);
         }
         let cipher = self.cipher.as_ref().ok_or(EventError::MasterKeyRequired)?;
+        // Length is checked above, so this conversion restates the same
+        // contract rather than introducing a new failure mode.
+        let nonce: [u8; 12] = encrypted
+            .nonce
+            .as_slice()
+            .try_into()
+            .map_err(|_| EventError::UnsupportedSecretFormat)?;
         cipher
-            .decrypt(
-                Nonce::from_slice(&encrypted.nonce),
-                encrypted.ciphertext.as_ref(),
-            )
+            .decrypt(&Nonce::from(nonce), encrypted.ciphertext.as_ref())
             .map_err(|_| EventError::Crypto)
     }
 
@@ -720,7 +721,7 @@ impl EventRepository for RedbEventRepository {
             return Err(EventError::InvalidSubscription);
         }
         let mut raw_secret = [0_u8; 32];
-        OsRng.fill_bytes(&mut raw_secret);
+        getrandom::fill(&mut raw_secret).map_err(|_| EventError::Crypto)?;
         let signing_secret = URL_SAFE_NO_PAD.encode(raw_secret);
         let encrypted_secret = self.encrypt_secret(signing_secret.as_bytes())?;
         let now = Utc::now();
