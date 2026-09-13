@@ -30,10 +30,21 @@ updates:
 
   # The fuzz targets are their own workspace with their own lockfile, so the
   # root cargo entry above does not see them.
+  #
+  # `direct` is load-bearing, not tidiness. fuzz/ reaches the rest of the tree
+  # through path dependencies, so nearly every entry in fuzz/Cargo.lock has its
+  # version constraint in the *root* Cargo.toml rather than in fuzz/Cargo.toml.
+  # Unrestricted, Dependabot edits that root manifest to satisfy the fuzz
+  # lockfile and leaves the root Cargo.lock untouched, which breaks every
+  # `--locked` build in the repository on a manifest its lockfile no longer
+  # matches. Those crates are the root cargo entry's job; what is genuinely the
+  # fuzz workspace's own is arbitrary and libfuzzer-sys.
   - package-ecosystem: cargo
     directory: /fuzz
     schedule:
       interval: weekly
+    allow:
+      - dependency-type: direct
     groups:
       fuzz-minor-patch:
         patterns: ["*"]
