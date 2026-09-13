@@ -9,6 +9,34 @@ publishes, so keep it factual and written for the people upgrading.
 
 ## [Unreleased]
 
+### Added
+
+- Fuzz targets for the parsers that run before a request is authenticated, in the
+  new `fuzz/` workspace: the S3 XML request bodies, the `Authorization` header, the
+  presigned-URL query, the `Range` header, the ListObjectsV2 query, and bucket-name
+  and object-key validation. Each target asserts an invariant rather than only the
+  absence of a panic. CI builds and briefly runs all of them.
+
+### Changed
+
+- `tests/rust-audit.sh` now runs `cargo audit --deny warnings` with no exceptions.
+  The RUSTSEC-2026-0235 exception is gone, and so is the finding it covered:
+  `rust_decimal` 1.43.0 dropped the optional `rkyv` 0.7 backend that had put the
+  crate in `Cargo.lock`, and `chacha20` moved off a yanked 0.10.1. `--deny warnings` makes a yanked crate a
+  failure rather than a note.
+- The documentation toolchain is pinned by hash. `requirements-docs.txt` now records
+  an exact version and every artifact SHA-256 for each package, direct and
+  transitive, and is installed with `pip install --require-hashes`.
+
+### Fixed
+
+- A `Range` header naming a last byte past the end of the object returned a range
+  reaching past EOF from `parse_range`. Responses were unaffected — the range was
+  truncated again before the body or the `Content-Range` header were built — but the
+  value was valid only because of that later call. It is now clamped where it is
+  parsed, as the `bytes=-N` suffix form already was. Found by the `s3_range_header`
+  fuzz target.
+
 ### Documentation
 
 - Added `SECURITY.md`: which versions receive security fixes, how to report a

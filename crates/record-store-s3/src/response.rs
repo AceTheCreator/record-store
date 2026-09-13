@@ -277,9 +277,20 @@ pub(crate) fn parse_range(value: &str, size: u64) -> Result<ByteRange, S3ErrorKi
         if end < start {
             return Err(S3ErrorKind::InvalidRange);
         }
-        end.checked_sub(start)
+        let requested = end
+            .checked_sub(start)
             .and_then(|value| value.checked_add(1))
-            .ok_or(S3ErrorKind::InvalidRange)?
+            .ok_or(S3ErrorKind::InvalidRange)?;
+        // RFC 7233: a last-byte-pos at or past the end of the representation
+        // means "to the end", not an error. The suffix branch above already
+        // clamps; without the same clamp here, `bytes=0-<huge>` returned a
+        // length reaching past EOF and stayed correct only because every
+        // caller happens to pass it through `ByteRange::resolve`, which
+        // truncates. Clamping at the source makes the returned range valid on
+        // its own rather than by the grace of a later call. `start < size` is
+        // established above, so the subtraction cannot wrap and the clamped
+        // length cannot reach zero.
+        requested.min(size - start)
     };
     ByteRange::new(start, length).map_err(|_| S3ErrorKind::InvalidRange)
 }
