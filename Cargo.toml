@@ -71,7 +71,7 @@ thiserror = "2.0.16"
 tokio = { version = "1.47.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1.17", features = ["net"] }
 tokio-util = { version = "0.7.16", features = ["io", "rt"] }
-toml = "0.9.5"
+toml = "1.1.5"
 tonic = { version = "0.14.6", default-features = false, features = ["codegen", "router", "tls-ring", "transport"] }
 tonic-prost = "0.14.6"
 tonic-prost-build = "0.14.6"
