@@ -28,6 +28,15 @@ publishes, so keep it factual and written for the people upgrading.
   an exact version and every artifact SHA-256 for each package, direct and
   transitive, and is installed with `pip install --require-hashes`.
 
+### Fixed
+
+- A `Range` header naming a last byte past the end of the object returned a range
+  reaching past EOF from `parse_range`. Responses were unaffected — the range was
+  truncated again before the body or the `Content-Range` header were built — but the
+  value was valid only because of that later call. It is now clamped where it is
+  parsed, as the `bytes=-N` suffix form already was. Found by the `s3_range_header`
+  fuzz target.
+
 ### Documentation
 
 - Added `SECURITY.md`: which versions receive security fixes, how to report a

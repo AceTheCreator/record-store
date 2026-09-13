@@ -446,6 +446,26 @@ mod tests {
         assert_eq!(parse_range("bytes=-4", 10).expect("suffix").offset(), 6);
     }
 
+    /// A last-byte-pos past the end of the object is not an error — RFC 7233
+    /// reads it as "to the end" — but the range that comes back has to stop at
+    /// the end, not merely get truncated later by whoever resolves it. Found by
+    /// the `s3_range_header` fuzz target, which asserts exactly this.
+    #[test]
+    fn a_range_ending_past_the_object_is_clamped_to_it() {
+        let range = parse_range("bytes=2-9999", 10).expect("range past EOF is accepted");
+        assert_eq!((range.offset(), range.length()), (2, 8));
+
+        // The suffix form has always clamped; both spellings agree now.
+        let suffix = parse_range("bytes=-9999", 10).expect("oversized suffix is accepted");
+        assert_eq!((suffix.offset(), suffix.length()), (0, 10));
+
+        // The case the fuzzer reduced to: a length that would otherwise reach
+        // far past the end of a large object.
+        let huge = parse_range("bytes=2222-2222222222222222222", 2_017_613_732_573_609_984)
+            .expect("range is accepted");
+        assert_eq!(huge.offset() + huge.length(), 2_017_613_732_573_609_984);
+    }
+
     #[test]
     fn canonical_query_sorts_and_encodes_values() {
         assert_eq!(
