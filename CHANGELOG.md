@@ -9,6 +9,11 @@ publishes, so keep it factual and written for the people upgrading.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-16
+
+A patch release. The S3 layer accepts the AWS SDK for Java v2's defaults, and a
+rustls advisory is closed. No configuration or data changes are required.
+
 ### Added
 
 - AWS SDK for Java v2 compatibility tests (Java 21, SDK 2.54.12), run by
@@ -53,6 +58,13 @@ publishes, so keep it factual and written for the people upgrading.
   value was valid only because of that later call. It is now clamped where it is
   parsed, as the `bytes=-N` suffix form already was. Found by the `s3_range_header`
   fuzz target.
+
+### Security
+
+- `rustls` moves from 0.23.43 to 0.23.45, closing RUSTSEC-2026-0285: releases
+  before 0.23.45 accept TLS 1.3 handshake messages across encryption level
+  boundaries. It reaches Record Store transitively through `reqwest`, so only the
+  lockfiles changed.
 
 ### Documentation
 
@@ -115,6 +127,7 @@ from a repository checkout.
 
 First tagged release, distributed as source.
 
-[unreleased]: https://github.com/OpenElementsLabs/record-store/compare/v0.1.1...HEAD
+[unreleased]: https://github.com/OpenElementsLabs/record-store/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/OpenElementsLabs/record-store/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/OpenElementsLabs/record-store/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/OpenElementsLabs/record-store/releases/tag/v0.1.0
