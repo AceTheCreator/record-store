@@ -15,7 +15,7 @@ use record_store_metadata::{
     ListObjectVersionsRequest, ListObjectsRequest, MetadataError, MetadataRepository,
 };
 use record_store_service::{ServiceError, Services};
-use redb::{Database, TableDefinition};
+use redb::{Database, ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::time::MissedTickBehavior;

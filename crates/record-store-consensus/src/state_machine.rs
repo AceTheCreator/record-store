@@ -29,7 +29,7 @@ use record_store_core::open_database;
 use record_store_metadata::{
     MetadataCommand, RedbMetadataRepository, apply_command_tx as apply_metadata_tx,
 };
-use redb::{Database, TableDefinition, WriteTransaction};
+use redb::{Database, ReadableDatabase, TableDefinition, WriteTransaction};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracing::{info, warn};

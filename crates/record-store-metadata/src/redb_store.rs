@@ -8,7 +8,7 @@ use record_store_core::{
     MultipartUpload, ObjectId, ObjectKey, ObjectMetadata, ObjectVersionRecord, PartNumber,
     StorageUsage, UploadId, UploadedPart, VersionId, VersioningState, open_database,
 };
-use redb::{Database, ReadableTable};
+use redb::{Database, ReadableDatabase, ReadableTable};
 
 use crate::error::backend;
 use crate::keys::{

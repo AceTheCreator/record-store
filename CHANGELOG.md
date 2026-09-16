@@ -11,6 +11,16 @@ publishes, so keep it factual and written for the people upgrading.
 
 ### Changed
 
+- redb moves from 2.6.3 to 4.x, which reads only file format v3. **Upgrade to
+  0.1.3 and start it once before upgrading to this release**: 0.1.3 converts
+  each database to v3, and the conversion is unavailable here because redb 4
+  removed `Database::upgrade` along with the ability to read v2. A database that
+  is still v2 is refused at startup with a message naming 0.1.3 rather than a
+  file format number.
+- **This release cannot be rolled back to 0.1.2 or earlier.** Those releases
+  cannot read the v3 file that 0.1.3 produced. 0.1.3 itself remains a safe
+  rollback target.
+
 - Every redb database is migrated from file format v2 to v3 when it is opened.
   redb 3.0 dropped the ability to read v2, and every release up to 0.1.2 wrote
   it, so a later redb 4 upgrade would otherwise meet a file it cannot open. The
