@@ -151,16 +151,36 @@ impl PayloadHash {
     }
 }
 
+// Check framing independently of authentication style, including presigned uploads.
+pub(crate) fn reject_streaming_payload(headers: &HeaderMap) -> Result<(), S3ErrorKind> {
+    let streaming_hash = headers
+        .get("x-amz-content-sha256")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("STREAMING-"));
+    let chunked = headers
+        .get_all("content-encoding")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|encoding| encoding.trim().eq_ignore_ascii_case("aws-chunked"));
+    if streaming_hash || chunked || headers.contains_key("x-amz-trailer") {
+        return Err(S3ErrorKind::StreamingPayloadNotImplemented);
+    }
+    Ok(())
+}
+
 pub(crate) fn parse_payload_hash(headers: &HeaderMap) -> Result<PayloadHash, S3ErrorKind> {
     let value = headers
         .get("x-amz-content-sha256")
         .and_then(|value| value.to_str().ok())
-        .ok_or(S3ErrorKind::InvalidRequest)?;
+        .ok_or(S3ErrorKind::InvalidPayloadHash)?;
     if value == "UNSIGNED-PAYLOAD" {
         return Ok(PayloadHash::Unsigned);
     }
-    let digest = hex::decode(value).map_err(|_| S3ErrorKind::InvalidRequest)?;
-    let digest: [u8; 32] = digest.try_into().map_err(|_| S3ErrorKind::InvalidRequest)?;
+    let digest = hex::decode(value).map_err(|_| S3ErrorKind::InvalidPayloadHash)?;
+    let digest: [u8; 32] = digest
+        .try_into()
+        .map_err(|_| S3ErrorKind::InvalidPayloadHash)?;
     Ok(PayloadHash::Sha256(Checksum::sha256(digest)))
 }
 

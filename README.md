@@ -140,7 +140,7 @@ campaign is `FUZZ_SECONDS=3600 tests/fuzz-smoke.sh`. See
 
 Storage microbenchmarks are reproducible with `cargo bench -p record-store-storage --bench storage`.
 
-Real-client compatibility checks exercise boto3, AWS SDK for JavaScript v3, and AWS SDK for Go against an ephemeral encrypted Record Store data directory on the fixed listeners. They cover bucket/object I/O, listing, multipart completion, presigned requests, browser CORS, ranges, versioning, historical reads, and copy behavior:
+Real-client compatibility checks exercise boto3, AWS SDK for JavaScript v3, AWS SDK for Go, and AWS SDK for Java v2 against an ephemeral encrypted Record Store data directory on the fixed listeners. They cover bucket/object I/O, listing, multipart completion, presigned requests, browser CORS, ranges, versioning, historical reads, and copy behavior:
 
 ```bash
 bash tests/compatibility/run.sh

@@ -113,6 +113,10 @@ pub(crate) fn signed_request(
         .map(|name| name.as_str().to_owned())
         .collect::<Vec<_>>();
     signed_headers.sort();
+    let payload_hash = headers["x-amz-content-sha256"]
+        .to_str()
+        .expect("payload hash")
+        .to_owned();
     let canonical = canonical_request(&method, &uri, &headers, &signed_headers, payload_hash)
         .expect("canonical request");
     let date = time.format("%Y%m%d").to_string();

@@ -49,6 +49,7 @@ Every SDK has a setting for this:
 | AWS CLI | `--endpoint-url` (path-style is used automatically) |
 | boto3 | `config=Config(s3={"addressing_style": "path"})` |
 | Go v2 | `o.UsePathStyle = true` |
+| Java v2 | `forcePathStyle(true)`, `chunkedEncodingEnabled(false)`; see [Java](../sdk/java.md) |
 | JavaScript v3 | `forcePathStyle: true` |
 | Rust | `.force_path_style(true)` |
 
@@ -129,6 +130,11 @@ Errors are XML in the S3 shape:
 The request ID is also in the `x-amz-request-id` response header. See
 [Error Reference](errors.md).
 
+Header-authenticated `UNSIGNED-PAYLOAD` is supported, including PUT requests.
+Unsupported AWS streaming payloads and trailing checksums return `501 NotImplemented`
+with a message identifying the encoding. Malformed `x-amz-content-sha256` values
+return `400 InvalidRequest` with a message identifying the header.
+
 ## Verified against real SDKs
 
 The repository's compatibility suite runs against a live server with these pinned
@@ -137,6 +143,7 @@ versions:
 | SDK | Version |
 | --- | --- |
 | `github.com/aws/aws-sdk-go-v2/service/s3` | 1.107.3 |
+| `software.amazon.awssdk:s3` | 2.54.12 |
 | `boto3` | 1.43.77 |
 | `@aws-sdk/client-s3` | 3.1115.0 |
 | `@aws-sdk/s3-request-presigner` | 3.1115.0 |

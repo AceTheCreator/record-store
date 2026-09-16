@@ -125,8 +125,14 @@ jobs:
         with:
           go-version-file: tests/compatibility/go/go.mod
           cache-dependency-path: tests/compatibility/go/go.sum
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: tests/compatibility/java/pom.xml
 
-      - name: Run boto3, AWS SDK for JavaScript, and AWS SDK for Go compatibility
+      - name: Run boto3, JavaScript, Go, and Java SDK compatibility
         run: tests/compatibility/run.sh
 
   # Catches a broken production Dockerfile before a tag is pushed, when fixing it

@@ -114,6 +114,7 @@ nav:
       - Next.js: sdk/nextjs.md
       - Python: sdk/python.md
       - Go: sdk/go.md
+      - Java: sdk/java.md
       - Rust: sdk/rust.md
   - Administration:
       - administration/index.md

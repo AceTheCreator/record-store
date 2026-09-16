@@ -63,6 +63,12 @@ impl S3Error {
 
 impl IntoResponse for S3Error {
     fn into_response(self) -> Response {
+        tracing::debug!(
+            request_id = %self.request_id.0,
+            code = self.kind.code(),
+            reason = self.kind.message(),
+            "S3 request rejected",
+        );
         let body = ErrorDocument {
             code: self.kind.code(),
             message: self.kind.message(),
@@ -99,6 +105,8 @@ pub(crate) enum S3ErrorKind {
     BucketNotEmpty,
     InvalidBucketName,
     InvalidRequest,
+    InvalidPayloadHash,
+    StreamingPayloadNotImplemented,
     InvalidRange,
     PreconditionFailed,
     InvalidPart,
@@ -127,7 +135,7 @@ impl S3ErrorKind {
             Self::BucketAlreadyExists => "BucketAlreadyExists",
             Self::BucketNotEmpty => "BucketNotEmpty",
             Self::InvalidBucketName => "InvalidBucketName",
-            Self::InvalidRequest => "InvalidRequest",
+            Self::InvalidRequest | Self::InvalidPayloadHash => "InvalidRequest",
             Self::InvalidRange => "InvalidRange",
             Self::PreconditionFailed => "PreconditionFailed",
             Self::InvalidPart => "InvalidPart",
@@ -136,7 +144,7 @@ impl S3ErrorKind {
             Self::QuotaExceeded => "QuotaExceeded",
             Self::MalformedXml => "MalformedXML",
             Self::BadDigest => "BadDigest",
-            Self::NotImplemented => "NotImplemented",
+            Self::NotImplemented | Self::StreamingPayloadNotImplemented => "NotImplemented",
             Self::ServiceUnavailable => "ServiceUnavailable",
             Self::InternalError => "InternalError",
         }
@@ -159,6 +167,12 @@ impl S3ErrorKind {
             Self::BucketNotEmpty => "The bucket is not empty",
             Self::InvalidBucketName => "The specified bucket is not valid",
             Self::InvalidRequest => "Invalid Request",
+            Self::InvalidPayloadHash => {
+                "x-amz-content-sha256 must be a SHA-256 digest or UNSIGNED-PAYLOAD"
+            }
+            Self::StreamingPayloadNotImplemented => {
+                "AWS streaming payloads (aws-chunked), including trailing checksums, are not implemented; disable chunked encoding in your SDK"
+            }
             Self::InvalidRange => "The requested range is not satisfiable",
             Self::PreconditionFailed => "At least one precondition failed",
             Self::InvalidPart => "One or more specified parts could not be found",
@@ -189,12 +203,15 @@ impl S3ErrorKind {
             Self::BucketNotEmpty => StatusCode::CONFLICT,
             Self::InvalidRange => StatusCode::RANGE_NOT_SATISFIABLE,
             Self::PreconditionFailed => StatusCode::PRECONDITION_FAILED,
-            Self::NotImplemented => StatusCode::NOT_IMPLEMENTED,
+            Self::NotImplemented | Self::StreamingPayloadNotImplemented => {
+                StatusCode::NOT_IMPLEMENTED
+            }
             Self::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
             Self::AuthorizationHeaderMalformed
             | Self::InvalidBucketName
             | Self::InvalidRequest
+            | Self::InvalidPayloadHash
             | Self::InvalidPart
             | Self::InvalidPartOrder
             | Self::EntityTooSmall
