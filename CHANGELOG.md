@@ -11,6 +11,11 @@ publishes, so keep it factual and written for the people upgrading.
 
 ### Added
 
+- AWS SDK for Java v2 compatibility tests (Java 21, SDK 2.54.12), run by
+  `tests/compatibility/run.sh` and in CI alongside the boto3, JavaScript, and Go
+  suites, and a Java client setup page. Java was the only major SDK without
+  coverage, and the only one whose defaults the suite could not otherwise exercise.
+
 - Fuzz targets for the parsers that run before a request is authenticated, in the
   new `fuzz/` workspace: the S3 XML request bodies, the `Authorization` header, the
   presigned-URL query, the `Range` header, the ListObjectsV2 query, and bucket-name
@@ -29,6 +34,18 @@ publishes, so keep it factual and written for the people upgrading.
   transitive, and is installed with `pip install --require-hashes`.
 
 ### Fixed
+
+- A PUT authenticated with a SigV4 `Authorization` header was refused when it
+  carried `x-amz-content-sha256: UNSIGNED-PAYLOAD`, which is a valid SigV4 value
+  and the AWS SDK for Java v2 default. Such requests are now accepted; the
+  signature, credentials, and any supplied checksum are still verified, and only
+  the body is left uncovered by the signature.
+- Unsupported AWS streaming payloads — `aws-chunked` framing and trailing
+  checksums — returned a generic `400 InvalidRequest`. They now return
+  `501 NotImplemented`, as the documentation promises for unsupported operations,
+  with a message naming the encoding and the setting to change. A malformed
+  `x-amz-content-sha256` likewise names the header it rejected instead of
+  reporting `Invalid Request`.
 
 - A `Range` header naming a last byte past the end of the object returned a range
   reaching past EOF from `parse_range`. Responses were unaffected — the range was

@@ -28,6 +28,7 @@ RECORD_STORE_SECRET_KEY=<service account secret key>
 
 <div class="grid cards" markdown>
 
+-   **[Java](java.md)** — AWS SDK v2
 -   **[JavaScript and TypeScript](javascript.md)** — AWS SDK v3
 -   **[Next.js](nextjs.md)** — presigned browser uploads, end to end
 -   **[Python](python.md)** — boto3
@@ -39,7 +40,7 @@ RECORD_STORE_SECRET_KEY=<service account secret key>
 
 ## Verified against real clients
 
-The repository runs compatibility tests against boto3, the AWS SDK for JavaScript v3,
+The repository runs compatibility tests against boto3, the AWS SDK for JavaScript v3, Java v2,
 and the AWS SDK for Go, driving a real Record Store server:
 
 ```bash

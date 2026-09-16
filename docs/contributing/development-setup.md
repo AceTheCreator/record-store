@@ -7,6 +7,7 @@
 | Rust | 1.97.1 — pinned by `rust-toolchain.toml` |
 | Node.js | 24, for the console |
 | Go | 1.24, for compatibility tests |
+| Java / Maven | Java 21 and Maven 3.9, for compatibility tests |
 | Python | 3, for compatibility tests |
 | Protobuf | Vendored — nothing to install |
 

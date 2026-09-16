@@ -185,6 +185,7 @@ pub(crate) async fn verify_request(
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Authenticated, S3ErrorKind> {
+    crate::sigv4::reject_streaming_payload(&headers)?;
     let (parsed, request_time, payload) = if headers.contains_key(header::AUTHORIZATION) {
         let authorization = headers
             .get(header::AUTHORIZATION)
@@ -237,12 +238,6 @@ pub(crate) async fn verify_request(
         || parsed.region.is_empty()
     {
         return Err(S3ErrorKind::AuthorizationHeaderMalformed);
-    }
-    if method == Method::PUT
-        && matches!(&payload, PayloadHash::Unsigned)
-        && headers.contains_key(header::AUTHORIZATION)
-    {
-        return Err(S3ErrorKind::InvalidRequest);
     }
     let (principal, secret) = state
         .credentials
@@ -384,6 +379,131 @@ mod tests {
     use chrono::{Duration, Utc};
     use record_store_auth::{Action, PolicyEffect, PolicyStatement};
     use record_store_core::OrganizationId;
+
+    #[tokio::test]
+    async fn unsigned_puts_verify_signatures_and_checksums() {
+        let (_directory, application, _) = test_router().await;
+        let unsigned = [("x-amz-content-sha256", "UNSIGNED-PAYLOAD")];
+        for (path, body) in [
+            ("/unsigned-bucket", b"".as_slice()),
+            ("/unsigned-bucket/key", b"hello".as_slice()),
+        ] {
+            let response = send(&application, Method::PUT, path, body, &unsigned).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{}",
+                body_text(response).await
+            );
+        }
+        let response = send(&application, Method::GET, "/unsigned-bucket/key", b"", &[]).await;
+        assert_eq!(body_text(response).await, "hello");
+        let invalid = signed_request(
+            Method::PUT,
+            "/unsigned-bucket/key",
+            b"changed",
+            &unsigned,
+            TEST_ACCESS_KEY,
+            "wrong-secret-at-least-sixteen",
+            Utc::now(),
+        );
+        let response = application
+            .clone()
+            .oneshot(invalid)
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            xml_value(&body_text(response).await, "Code"),
+            Some("SignatureDoesNotMatch")
+        );
+        let response = send(
+            &application,
+            Method::PUT,
+            "/unsigned-bucket/key",
+            b"changed",
+            &[
+                ("x-amz-content-sha256", "UNSIGNED-PAYLOAD"),
+                (
+                    "x-amz-checksum-sha256",
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                ),
+            ],
+        )
+        .await;
+        assert_eq!(
+            xml_value(&body_text(response).await, "Code"),
+            Some("BadDigest")
+        );
+        let response = send(&application, Method::GET, "/unsigned-bucket/key", b"", &[]).await;
+        assert_eq!(body_text(response).await, "hello");
+    }
+
+    #[tokio::test]
+    async fn streaming_payloads_and_malformed_hashes_have_specific_errors() {
+        let (_directory, application, _) = test_router().await;
+        for headers in [
+            vec![(
+                "x-amz-content-sha256",
+                "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER",
+            )],
+            vec![("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER")],
+            vec![("x-amz-content-sha256", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD")],
+            vec![("content-encoding", "gzip, AWS-CHUNKED")],
+            vec![("x-amz-trailer", "x-amz-checksum-crc32")],
+        ] {
+            let response = send(
+                &application,
+                Method::PUT,
+                "/missing/key",
+                b"framed",
+                &headers,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+            assert!(response.headers().contains_key("x-amz-request-id"));
+            let body = body_text(response).await;
+            assert_eq!(xml_value(&body, "Code"), Some("NotImplemented"));
+            assert!(
+                xml_value(&body, "Message")
+                    .unwrap()
+                    .contains("disable chunked encoding")
+            );
+        }
+        let mut presigned = presigned_request(
+            Method::PUT,
+            "/missing/key",
+            TEST_ACCESS_KEY,
+            TEST_SECRET_KEY,
+            Utc::now(),
+            60,
+        );
+        presigned
+            .headers_mut()
+            .insert("content-encoding", HeaderValue::from_static("aws-chunked"));
+        let response = application
+            .clone()
+            .oneshot(presigned)
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let response = send(
+            &application,
+            Method::PUT,
+            "/missing/key",
+            b"",
+            &[("x-amz-content-sha256", "invalid")],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = body_text(response).await;
+        assert_eq!(xml_value(&body, "Code"), Some("InvalidRequest"));
+        assert!(
+            xml_value(&body, "Message")
+                .unwrap()
+                .contains("x-amz-content-sha256")
+        );
+    }
 
     #[tokio::test]
     async fn presigned_get_put_are_bounded_to_method_and_expiration() {

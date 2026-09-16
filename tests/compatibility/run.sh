@@ -107,3 +107,9 @@ npm ci --silent --ignore-scripts --prefix "$run_directory/javascript"
 node "$run_directory/javascript/compat.mjs"
 
 (cd "$compatibility_root/go" && go test -count=1 ./...)
+
+# Keep Maven build output inside the disposable run directory.
+mkdir "$run_directory/java"
+cp "$compatibility_root/java/pom.xml" "$run_directory/java/"
+cp -R "$compatibility_root/java/src" "$run_directory/java/"
+mvn --batch-mode --no-transfer-progress -f "$run_directory/java/pom.xml" test
