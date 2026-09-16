@@ -28,8 +28,8 @@ out. For anything you intend to keep running, name the release instead, so an
 upgrade is something you decide rather than something that happens:
 
 ```bash
-docker pull ghcr.io/openelementslabs/record-store:0.1.2
-docker pull ghcr.io/openelementslabs/record-store-console:0.1.2
+docker pull ghcr.io/openelementslabs/record-store:0.1.3
+docker pull ghcr.io/openelementslabs/record-store-console:0.1.3
 ```
 
 Either way, keep the two images on the same version. Both cover `linux/amd64`

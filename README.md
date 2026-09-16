@@ -38,7 +38,7 @@ docker pull ghcr.io/openelementslabs/record-store:latest
 docker pull ghcr.io/openelementslabs/record-store-console:latest
 ```
 
-`latest` tracks the newest stable release. Name a version instead — `0.1.2`,
+`latest` tracks the newest stable release. Name a version instead — `0.1.3`,
 `0.1`, or a digest — for anything you intend to keep running.
 
 Both packages are public, so no `docker login` is needed. To run both from the
