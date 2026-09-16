@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, fmt::Display, path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use record_store_core::AuditEventId;
+use record_store_core::{AuditEventId, open_database};
 use redb::{Database, TableDefinition};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -101,7 +101,7 @@ impl RedbAuditRepository {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(AuditError::Directory)?;
             }
-            let database = Database::create(path).map_err(|error| backend("open", error))?;
+            let database = open_database(path).map_err(|error| backend("open", error))?;
             let write = database
                 .begin_write()
                 .map_err(|error| backend("initialize", error))?;

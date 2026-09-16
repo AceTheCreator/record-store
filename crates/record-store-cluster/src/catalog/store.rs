@@ -3,6 +3,7 @@ use std::{path::Path, sync::Arc};
 use chrono::{DateTime, Utc};
 use record_store_core::{
     ClusterOperationId, JoinTokenId, NodeCredentialId, NodeId, ObjectId, ReplicaTaskId,
+    open_database,
 };
 use redb::{Database, ReadableTable, WriteTransaction};
 
@@ -81,8 +82,7 @@ impl ClusterCatalog {
                 std::fs::create_dir_all(parent)
                     .map_err(|error| backend("create directory", error))?;
             }
-            let database =
-                Database::create(path).map_err(|error| backend("open catalog", error))?;
+            let database = open_database(path).map_err(|error| backend("open catalog", error))?;
             initialize_tables(&database)?;
             Ok(Self {
                 database: Arc::new(database),

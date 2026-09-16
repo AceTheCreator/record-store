@@ -8,7 +8,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
-use record_store_core::{EventId, VersionId, WebhookId};
+use record_store_core::{EventId, VersionId, WebhookId, open_database};
 use redb::{Database, ReadableTable, TableDefinition};
 use reqwest::{Client, Url, redirect::Policy};
 use serde::{Deserialize, Serialize};
@@ -303,7 +303,7 @@ impl RedbEventRepository {
         }
         let path = path.as_ref().to_owned();
         let database =
-            tokio::task::spawn_blocking(move || Database::create(path).map_err(database_error))
+            tokio::task::spawn_blocking(move || open_database(path).map_err(database_error))
                 .await??;
         let database = Arc::new(database);
         let db = Arc::clone(&database);
