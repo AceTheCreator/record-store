@@ -34,15 +34,19 @@ Record Store publishes production container images for `linux/amd64` and
 `linux/arm64` to the GitHub Container Registry:
 
 ```bash
-docker pull ghcr.io/openelementslabs/record-store:0.1.1
-docker pull ghcr.io/openelementslabs/record-store-console:0.1.1
+docker pull ghcr.io/openelementslabs/record-store:latest
+docker pull ghcr.io/openelementslabs/record-store-console:latest
 ```
 
+`latest` tracks the newest stable release. Name a version instead — `0.1.2`,
+`0.1`, or a digest — for anything you intend to keep running.
+
 Both packages are public, so no `docker login` is needed. To run both from the
-published images:
+published images, with `RECORD_STORE_VERSION` selecting the tag:
 
 ```bash
-docker compose --env-file .env -f deploy/docker/compose.ghcr.yml up -d
+RECORD_STORE_VERSION=latest \
+  docker compose --env-file .env -f deploy/docker/compose.ghcr.yml up -d
 ```
 
 Each release carries SPDX SBOMs and a `SHA256SUMS` file covering every asset.

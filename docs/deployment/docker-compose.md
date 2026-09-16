@@ -17,9 +17,21 @@ no setup. **Override every one before running anything real.**
 until every secret is set:
 
 ```bash
-RECORD_STORE_VERSION=0.1.1 \
+RECORD_STORE_VERSION=0.1.2 \
   docker compose --env-file .env -f deploy/docker/compose.ghcr.yml up -d
 ```
+
+`RECORD_STORE_VERSION` picks the tag for both images. Use `latest` to follow the
+newest stable release, or name a version to hold still:
+
+```bash
+RECORD_STORE_VERSION=latest \
+  docker compose --env-file .env -f deploy/docker/compose.ghcr.yml up -d
+```
+
+Left unset it defaults to the release the file shipped with, which pins but
+quietly ages. See [Container Images](container-images.md) for every tag and for
+digest pinning.
 
 ## Server only
 

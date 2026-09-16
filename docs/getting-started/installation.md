@@ -19,13 +19,24 @@ A system `protoc` is **not** required. The build vendors what it needs.
 The shortest path, and the one to use in production. Nothing is compiled.
 
 ```bash
-docker pull ghcr.io/openelementslabs/record-store:0.1.1
-docker pull ghcr.io/openelementslabs/record-store-console:0.1.1
+docker pull ghcr.io/openelementslabs/record-store:latest
+docker pull ghcr.io/openelementslabs/record-store-console:latest
 ```
 
-Both images cover `linux/amd64` and `linux/arm64`; one pull resolves the right
-architecture. Record Store has no built-in credentials, so it will not start
-until you supply them:
+`latest` is the newest stable release, which is what you want while trying this
+out. For anything you intend to keep running, name the release instead, so an
+upgrade is something you decide rather than something that happens:
+
+```bash
+docker pull ghcr.io/openelementslabs/record-store:0.1.2
+docker pull ghcr.io/openelementslabs/record-store-console:0.1.2
+```
+
+Either way, keep the two images on the same version. Both cover `linux/amd64`
+and `linux/arm64`; one pull resolves the right architecture.
+
+Record Store has no built-in credentials, so it will not start until you supply
+them:
 
 ```bash
 docker run --read-only \
@@ -35,7 +46,7 @@ docker run --read-only \
   -e RECORD_STORE_MANAGEMENT_SYSTEM_TOKEN \
   -p 7600:7600 -p 7601:7601 \
   -v record-store-data:/var/lib/record-store \
-  ghcr.io/openelementslabs/record-store:0.1.1
+  ghcr.io/openelementslabs/record-store:latest
 ```
 
 To run the server and the console together from the published images:
@@ -46,9 +57,17 @@ cd record-store
 docker compose --env-file .env -f deploy/docker/compose.ghcr.yml up -d
 ```
 
-Both packages are public, so no `docker login` is needed. See
-[Container Images](../deployment/container-images.md) for tags and digest
-pinning, and
+Both packages are public, so no `docker login` is needed. `RECORD_STORE_VERSION`
+selects the tag that Compose file uses, and defaults to the release this page
+documents:
+
+```bash
+RECORD_STORE_VERSION=latest \
+  docker compose --env-file .env -f deploy/docker/compose.ghcr.yml up -d
+```
+
+See [Container Images](../deployment/container-images.md) for the full tag list,
+how to choose between them, and digest pinning, and
 [Verifying a Release](../deployment/verifying-releases.md) for checking where an
 image came from.
 

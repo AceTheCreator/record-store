@@ -53,6 +53,22 @@ cargo update --workspace
 cd console && npm install --package-lock-only
 ```
 
+The version also appears in documentation examples and as the Compose default,
+where nothing validates it. Those are not read by the release, but a reader who
+copies them gets the previous release:
+
+| File | What to update |
+| --- | --- |
+| `deploy/docker/compose.ghcr.yml` | `RECORD_STORE_VERSION` default, both images |
+| `deploy/docker/docker-compose.ghcr.yaml` | `RECORD_STORE_VERSION` default, both images |
+| `docs/deployment/container-images.md` | Tag table and examples |
+| `docs/deployment/docker-compose.md`, `docs/deployment/upgrading.md` | Examples |
+| `docs/getting-started/installation.md`, `README.md` | Pinned-version examples |
+
+`grep -rn "X\.Y\.Z" docs deploy README.md` finds the previous release's
+leftovers. Leave references that are deliberately historical, such as which
+releases predate build attestation.
+
 Then add the section to `CHANGELOG.md`. It becomes the release notes verbatim, so
 write it for the people upgrading, and note anything that requires action on their
 part. **A missing changelog section fails the release** — that is deliberate.

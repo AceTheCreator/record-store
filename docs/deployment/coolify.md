@@ -15,7 +15,8 @@ Prefer the first. Nothing is compiled on the server, deployments take seconds
 rather than minutes, and the artifact you run is the one that was released and
 tested. Both packages are public, so Coolify pulls them with no registry
 credentials configured. Set `RECORD_STORE_VERSION` to the release you intend to
-run.
+run — a version such as `0.1.2` for a deployment you control, or `latest` to
+take the newest stable release on every redeploy.
 
 Both differ from the `compose.*` development files in three ways: they use
 `expose` rather than `ports`, they declare Coolify magic environment variables so
