@@ -27,16 +27,16 @@ record-store server backup-metadata --output /backups/pre-upgrade
 docker stop --time 40 record-store
 
 # 3. Pull the new image
-docker pull ghcr.io/openelementslabs/record-store:0.1.2
+docker pull ghcr.io/openelementslabs/record-store:0.1.3
 
 # 4. Validate configuration against the new version before starting it
 docker run --rm \
   --env-file /etc/record-store/env \
-  ghcr.io/openelementslabs/record-store:0.1.2 \
+  ghcr.io/openelementslabs/record-store:0.1.3 \
   record-store server check-config
 
 # 5. Start
-docker run -d --name record-store ... ghcr.io/openelementslabs/record-store:0.1.2
+docker run -d --name record-store ... ghcr.io/openelementslabs/record-store:0.1.3
 
 # 6. Verify
 record-store status --endpoint http://127.0.0.1:7601
@@ -69,7 +69,7 @@ moving to, and to be able to move back to what you had. See
 ```bash
 # Confirm what you are about to run before you run it
 docker run --rm --entrypoint record-store \
-  ghcr.io/openelementslabs/record-store:0.1.2 --version
+  ghcr.io/openelementslabs/record-store:0.1.3 --version
 ```
 
 Check the digest and the checksums before you deploy — see

@@ -9,6 +9,12 @@ publishes, so keep it factual and written for the people upgrading.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-09-16
+
+A patch release that prepares every database for the next one. It changes no
+configuration and no API, and it is worth installing promptly: the release that
+follows cannot read a database this one has not opened.
+
 ### Changed
 
 - Every redb database is migrated from file format v2 to v3 when it is opened.
@@ -137,7 +143,8 @@ from a repository checkout.
 
 First tagged release, distributed as source.
 
-[unreleased]: https://github.com/OpenElementsLabs/record-store/compare/v0.1.2...HEAD
+[unreleased]: https://github.com/OpenElementsLabs/record-store/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/OpenElementsLabs/record-store/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/OpenElementsLabs/record-store/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/OpenElementsLabs/record-store/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/OpenElementsLabs/record-store/releases/tag/v0.1.0

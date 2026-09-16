@@ -25,7 +25,7 @@ deploying one.
 
 ```bash
 gh attestation verify \
-  oci://ghcr.io/openelementslabs/record-store:0.1.2 \
+  oci://ghcr.io/openelementslabs/record-store:0.1.3 \
   --repo OpenElementsLabs/record-store
 ```
 
@@ -41,7 +41,7 @@ attestations registry-side finds it without calling GitHub:
 
 ```bash
 docker buildx imagetools inspect \
-  ghcr.io/openelementslabs/record-store:0.1.2 --format '{{ json .Provenance }}'
+  ghcr.io/openelementslabs/record-store:0.1.3 --format '{{ json .Provenance }}'
 ```
 
 Verify the digest you are deploying rather than a floating tag:
@@ -76,7 +76,7 @@ Release tags are signed by the maintainer who cut them:
 
 ```bash
 git fetch --tags
-git tag -v v0.1.2
+git tag -v v0.1.3
 ```
 
 A `Good signature` line, from a key you have reason to trust, is the strongest
@@ -85,7 +85,7 @@ statement available today about who produced a release.
 ## Image digests
 
 ```bash
-docker buildx imagetools inspect ghcr.io/openelementslabs/record-store:0.1.2
+docker buildx imagetools inspect ghcr.io/openelementslabs/record-store:0.1.3
 ```
 
 This prints the manifest digest and one entry per platform. Compare the digest
@@ -97,7 +97,7 @@ tag moves.
 ## SBOM
 
 Each release attaches an SPDX JSON SBOM per image and per architecture, for
-example `record-store-0.1.2-linux-amd64.spdx.json`. Download it from the release
+example `record-store-0.1.3-linux-amd64.spdx.json`. Download it from the release
 page alongside the image you are deploying.
 
 An SBOM lists what is inside the image. It is the input to asking whether a newly
@@ -110,11 +110,11 @@ The simplest check, and the one that catches a mislabelled image:
 
 ```bash
 docker run --rm --entrypoint record-store \
-  ghcr.io/openelementslabs/record-store:0.1.2 --version
+  ghcr.io/openelementslabs/record-store:0.1.3 --version
 ```
 
 ```text
-record-store 0.1.2
+record-store 0.1.3
 ```
 
 The release workflow makes this same assertion against the image it just pushed,
