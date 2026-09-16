@@ -10,7 +10,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use chrono::Utc;
 use record_store_audit::{AuditEvent, AuditRepository, AuditResult};
-use record_store_core::{AuditEventId, LifecycleRule, LifecycleRuleId};
+use record_store_core::{AuditEventId, LifecycleRule, LifecycleRuleId, open_database};
 use record_store_metadata::{
     ListObjectVersionsRequest, ListObjectsRequest, MetadataError, MetadataRepository,
 };
@@ -77,7 +77,7 @@ impl LifecycleWorker {
         }
         let path = path.as_ref().to_owned();
         let database = tokio::task::spawn_blocking(move || {
-            let database = Database::create(path).map_err(database_error)?;
+            let database = open_database(path).map_err(database_error)?;
             let write = database.begin_write().map_err(database_error)?;
             {
                 write.open_table(CURSORS).map_err(database_error)?;

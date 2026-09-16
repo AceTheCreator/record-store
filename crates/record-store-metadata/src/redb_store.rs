@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use record_store_core::{
     Bucket, BucketId, BucketName, BucketQuota, CorsConfiguration, LifecycleRule, LifecycleRuleId,
     MultipartUpload, ObjectId, ObjectKey, ObjectMetadata, ObjectVersionRecord, PartNumber,
-    StorageUsage, UploadId, UploadedPart, VersionId, VersioningState,
+    StorageUsage, UploadId, UploadedPart, VersionId, VersioningState, open_database,
 };
 use redb::{Database, ReadableTable};
 
@@ -41,7 +41,7 @@ impl RedbMetadataRepository {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(MetadataError::Directory)?;
             }
-            let database = Database::create(path).map_err(|error| backend("open", error))?;
+            let database = open_database(path).map_err(|error| backend("open", error))?;
             initialize_schema(&database)?;
             Ok(Self {
                 database: Arc::new(database),

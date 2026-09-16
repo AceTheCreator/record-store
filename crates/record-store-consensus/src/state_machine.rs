@@ -25,6 +25,7 @@ use openraft::{
     StorageIOError, storage::RaftStateMachine,
 };
 use record_store_cluster::{ClusterCatalog, ClusterCommand, apply_command_tx as apply_cluster_tx};
+use record_store_core::open_database;
 use record_store_metadata::{
     MetadataCommand, RedbMetadataRepository, apply_command_tx as apply_metadata_tx,
 };
@@ -108,7 +109,7 @@ impl ReplicatedState {
                 }
                 std::fs::create_dir_all(&snapshot_directory)
                     .map_err(StateMachineError::Directory)?;
-                let database = Database::create(state_path)
+                let database = open_database(state_path)
                     .map_err(|error| StateMachineError::Open(error.to_string()))?;
                 let write = database
                     .begin_write()

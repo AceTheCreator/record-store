@@ -19,7 +19,7 @@ use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
 };
 use chrono::{DateTime, Utc};
-use record_store_core::{BucketId, EmbedLinkId, ObjectKey, ShareLinkId};
+use record_store_core::{BucketId, EmbedLinkId, ObjectKey, ShareLinkId, open_database};
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::Sha256;
@@ -129,7 +129,7 @@ impl CapabilityStore {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(SharingError::Directory)?;
             }
-            let database = Database::create(path).map_err(|error| backend("open", error))?;
+            let database = open_database(path).map_err(|error| backend("open", error))?;
             initialize_schema(&database)?;
             Ok::<_, SharingError>(database)
         })

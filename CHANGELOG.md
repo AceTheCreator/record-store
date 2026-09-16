@@ -9,6 +9,16 @@ publishes, so keep it factual and written for the people upgrading.
 
 ## [Unreleased]
 
+### Changed
+
+- Every redb database is migrated from file format v2 to v3 when it is opened.
+  redb 3.0 dropped the ability to read v2, and every release up to 0.1.2 wrote
+  it, so a later redb 4 upgrade would otherwise meet a file it cannot open. The
+  migration runs once per database on first start, is a no-op afterwards, and
+  the redb version shipped here still reads a migrated file — this release
+  remains one you can go back to. **Upgrade to this release before any release
+  that carries redb 4.**
+
 ## [0.1.2] - 2026-09-16
 
 A patch release. The S3 layer accepts the AWS SDK for Java v2's defaults, and a

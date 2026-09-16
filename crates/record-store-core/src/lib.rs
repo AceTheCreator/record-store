@@ -17,6 +17,7 @@ mod object;
 mod preview;
 mod quota;
 mod range;
+mod redb_open;
 mod shard;
 mod storage_class;
 
@@ -38,5 +39,6 @@ pub use object::{
 pub use preview::{CONTENT_SIGNATURE_PROBE_BYTES, PreviewKind, content_signature_matches};
 pub use quota::{BucketQuota, ByteQuota, ExpirationDays, ObjectCountQuota, VersioningState};
 pub use range::{ByteRange, PartNumber, ResolvedByteRange};
+pub use redb_open::open_database;
 pub use shard::{ShardIndex, ShardKind, ShardState};
 pub use storage_class::StorageClass;

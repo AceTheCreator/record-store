@@ -24,6 +24,7 @@ use openraft::{
     LogId, LogState, OptionalSend, RaftLogId, RaftLogReader, StorageError, StorageIOError, Vote,
     storage::{LogFlushed, RaftLogStorage},
 };
+use record_store_core::open_database;
 use redb::{Database, ReadableTable, TableDefinition};
 
 use crate::types::{ConsensusEntry, MemberId, RecordStoreTypeConfig};
@@ -70,7 +71,7 @@ impl RedbLogStore {
                 std::fs::create_dir_all(parent).map_err(LogStoreError::Directory)?;
             }
             let database =
-                Database::create(path).map_err(|error| LogStoreError::Open(error.to_string()))?;
+                open_database(path).map_err(|error| LogStoreError::Open(error.to_string()))?;
             let write = database
                 .begin_write()
                 .map_err(|error| LogStoreError::Open(error.to_string()))?;

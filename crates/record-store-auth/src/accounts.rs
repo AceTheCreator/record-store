@@ -2,8 +2,8 @@ use std::{path::Path, sync::Arc};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
-use record_store_core::{OrganizationId, ServiceAccountId};
-use redb::{Database, ReadableTable};
+use record_store_core::{OrganizationId, ServiceAccountId, open_database};
+use redb::ReadableTable;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -40,7 +40,7 @@ impl CredentialManager {
             if let Some(parent) = parent {
                 std::fs::create_dir_all(parent).map_err(CredentialStoreError::Directory)?;
             }
-            let database = Database::create(path).map_err(store_backend)?;
+            let database = open_database(path).map_err(store_backend)?;
             let write = database.begin_write().map_err(store_backend)?;
             {
                 write.open_table(ACCOUNTS).map_err(store_backend)?;
