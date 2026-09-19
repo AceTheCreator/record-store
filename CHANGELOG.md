@@ -46,6 +46,12 @@ publishes, so keep it factual and written for the people upgrading.
   protection keep working. The mark is not substituted for the wall clock, because a
   single bogus forward jump would then become a permanent licence to delete early.
 
+  The worker that refreshes the mark races each observation against the shutdown signal
+  rather than awaiting it. In a cluster that observation is a consensus proposal, and a
+  node mid-join has no leader to accept one, so awaiting it would make graceful shutdown
+  wait for a write that might never land. It also skips the immediate first tick a tokio
+  interval delivers, which kept a replicated write out of the boot window.
+
 - `record-store bucket object-lock show|set-default|status`, and the management API
   routes behind them. Per-object lock state is read-only on the management plane by
   design: placing or releasing a retention is an S3 action governed by S3 policy, and a

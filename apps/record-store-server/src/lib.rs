@@ -507,17 +507,46 @@ async fn run_clock_watermark(
     interval: Duration,
     cancellation: CancellationToken,
 ) {
+    run_observation_loop(interval, cancellation, || async {
+        // A refusal here is the whole point of the mark, and the service has
+        // already logged it. Nothing else to do but keep checking: the clock
+        // may yet be corrected.
+        let _ = services.locks.observe_clock().await;
+    })
+    .await;
+}
+
+/// Runs a periodic observation that never outlives its cancellation signal.
+///
+/// The observation is raced against cancellation rather than awaited inside the
+/// tick arm. That distinction is the whole point of this helper: in a cluster
+/// the observation is a consensus proposal, which can take arbitrarily long or
+/// never resolve, and a supervised task still sitting inside one holds up the
+/// entire graceful shutdown. An operator meets that as a node that will not
+/// stop.
+async fn run_observation_loop<F, Fut>(
+    interval: Duration,
+    cancellation: CancellationToken,
+    observe: F,
+) where
+    F: Fn() -> Fut,
+    Fut: Future<Output = ()>,
+{
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // A tokio interval's first tick completes immediately. There is nothing to
+    // observe the instant the catalog was opened, and in a cluster this would
+    // aim a replicated write at the one moment the node is least able to serve
+    // one.
+    ticker.tick().await;
     loop {
         tokio::select! {
             () = cancellation.cancelled() => return,
-            _ = ticker.tick() => {
-                // A refusal here is the whole point of the mark, and the
-                // service has already logged it. Nothing else to do but keep
-                // checking: the clock may yet be corrected.
-                let _ = services.locks.observe_clock().await;
-            }
+            _ = ticker.tick() => {}
+        }
+        tokio::select! {
+            () = cancellation.cancelled() => return,
+            () = observe() => {}
         }
     }
 }
@@ -786,4 +815,107 @@ pub enum StartupError {
     /// HTTP serving or graceful shutdown failed.
     #[error("HTTP lifecycle failed: {0}")]
     Http(record_store_api::ServerError),
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::Notify;
+
+    use super::*;
+
+    /// A supervised worker must never outlive its cancellation, even when the
+    /// work it is doing never finishes.
+    ///
+    /// This is not hypothetical. The Object Lock clock observation is a
+    /// consensus proposal in a cluster, and a node mid-join has no leader to
+    /// accept it. Awaiting that inside the tick arm made graceful shutdown wait
+    /// for a write that might never land, which an operator meets as a node
+    /// that will not stop.
+    #[tokio::test]
+    async fn an_observation_that_never_finishes_still_stops_at_cancellation() {
+        let cancellation = CancellationToken::new();
+        let observing = Arc::new(Notify::new());
+        let worker = {
+            let observing = Arc::clone(&observing);
+            tokio::spawn(run_observation_loop(
+                Duration::from_millis(10),
+                cancellation.clone(),
+                move || {
+                    let observing = Arc::clone(&observing);
+                    async move {
+                        observing.notify_one();
+                        // Stands in for a proposal with no leader to accept it.
+                        std::future::pending::<()>().await
+                    }
+                },
+            ))
+        };
+
+        // Cancel only once the worker is genuinely inside the observation, so
+        // this tests the in-flight case rather than the idle one.
+        tokio::time::timeout(Duration::from_secs(5), observing.notified())
+            .await
+            .expect("the worker reaches its first observation");
+        cancellation.cancel();
+
+        tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .expect("a worker stuck in an observation must still stop when cancelled")
+            .expect("worker task");
+    }
+
+    /// An idle worker stops too, without waiting for the next tick to come
+    /// around. A long interval must not become a long shutdown.
+    #[tokio::test]
+    async fn a_worker_between_ticks_stops_without_waiting_for_the_next_one() {
+        let cancellation = CancellationToken::new();
+        let worker = tokio::spawn(run_observation_loop(
+            // Far longer than the bound below: if the loop waited for a tick,
+            // this could not pass.
+            Duration::from_secs(3_600),
+            cancellation.clone(),
+            || async {},
+        ));
+        cancellation.cancel();
+        tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .expect("cancellation does not wait for the next tick")
+            .expect("worker task");
+    }
+
+    /// The first tick of a tokio interval fires immediately. Consuming it keeps
+    /// a replicated write out of the boot window, where a cluster node has not
+    /// necessarily joined a consensus group yet.
+    #[tokio::test]
+    async fn the_loop_does_not_observe_immediately_on_startup() {
+        let cancellation = CancellationToken::new();
+        let observations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker = {
+            let observations = Arc::clone(&observations);
+            tokio::spawn(run_observation_loop(
+                Duration::from_secs(3_600),
+                cancellation.clone(),
+                move || {
+                    let observations = Arc::clone(&observations);
+                    async move {
+                        observations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                },
+            ))
+        };
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(
+            observations.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the worker must wait a full interval before its first observation"
+        );
+        cancellation.cancel();
+        tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .expect("bounded stop")
+            .expect("worker task");
+    }
 }
