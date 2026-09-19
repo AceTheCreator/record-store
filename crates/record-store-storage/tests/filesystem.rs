@@ -37,6 +37,7 @@ async fn store() -> (
         quota: BucketQuota::default(),
         storage_class: None,
         durability_policy: None,
+        object_lock: None,
         cors: None,
     };
     repository
@@ -66,6 +67,7 @@ fn put_request(bucket_id: BucketId, key: &str, chunks: &[&'static [u8]]) -> PutO
         expected_checksum: None,
         object_id: None,
         protocol_etag: None,
+        object_lock: None,
         body: upload_stream(stream::iter(chunks)),
     }
 }
@@ -186,6 +188,7 @@ async fn cancelled_upload_cleans_its_temporary_file() {
         expected_checksum: None,
         object_id: None,
         protocol_etag: None,
+        object_lock: None,
         body: upload_stream(body),
     };
 
@@ -261,6 +264,7 @@ async fn empty_and_large_generated_objects_remain_streaming() {
             expected_checksum: None,
             object_id: None,
             protocol_etag: None,
+            object_lock: None,
             body: upload_stream(body),
         })
         .await
@@ -365,6 +369,7 @@ async fn concurrent_reads_and_same_key_writes_publish_only_complete_objects() {
                     expected_checksum: None,
                     object_id: None,
                     protocol_etag: None,
+                    object_lock: None,
                     body: upload_stream(stream::once(async move { Ok(payload) })),
                 })
                 .await
@@ -472,6 +477,7 @@ async fn envelope_encryption_streams_ranges_survives_restart_and_detects_tamperi
         quota: BucketQuota::default(),
         storage_class: None,
         durability_policy: None,
+        object_lock: None,
         cors: None,
     };
     repository
@@ -499,6 +505,7 @@ async fn envelope_encryption_streams_ranges_survives_restart_and_detects_tamperi
             expected_checksum: None,
             object_id: None,
             protocol_etag: None,
+            object_lock: None,
             body: upload_stream(stream::iter(
                 plaintext
                     .chunks(7_919)
@@ -611,6 +618,7 @@ async fn envelope_encryption_covers_durable_multipart_parts_and_completion() {
         quota: BucketQuota::default(),
         storage_class: None,
         durability_policy: None,
+        object_lock: None,
         cors: None,
     };
     repository
@@ -623,6 +631,7 @@ async fn envelope_encryption_covers_durable_multipart_parts_and_completion() {
         key: ObjectKey::new("multipart/secret.bin").expect("key"),
         content_type: None,
         custom_metadata: BTreeMap::new(),
+        object_lock: None,
         initiated_at: Utc::now(),
         state: MultipartUploadState::Active,
     };

@@ -509,7 +509,11 @@ impl ObjectStore for LocalFilesystemStore {
         };
 
         let _publication_guard = key_lock.write().await;
-        let commit = match self.metadata.put_object(&metadata).await {
+        let commit = match self
+            .metadata
+            .put_object(&metadata, request.object_lock)
+            .await
+        {
             Ok(commit) => commit,
             Err(error) => {
                 if cleanup_file(&payload_path).await {
@@ -691,6 +695,11 @@ impl ObjectStore for LocalFilesystemStore {
                 expected_checksum: None,
                 object_id: Some(object_id),
                 protocol_etag: Some(protocol_etag),
+                // The lock captured when the upload was created, not whatever
+                // the bucket default says now: a multipart upload can outlive a
+                // change to that default, and the caller was told the terms at
+                // initiation.
+                object_lock: persisted.object_lock,
                 body: upload_stream(body),
             })
             .await?;
@@ -760,7 +769,12 @@ impl ObjectStore for LocalFilesystemStore {
         let _guard = key_lock.write().await;
         let result = self
             .metadata
-            .delete_object_version(request.bucket_id, &request.key, request.version_id)
+            .delete_object_version(
+                request.bucket_id,
+                &request.key,
+                request.version_id,
+                request.release,
+            )
             .await?
             .ok_or(StorageError::ObjectNotFound)?;
         if let Some(metadata) = result.cleanup {
@@ -990,6 +1004,7 @@ mod tests {
                 expected_checksum: Some(Checksum::sha256([0_u8; 32])),
                 object_id: None,
                 protocol_etag: None,
+                object_lock: None,
                 body: crate::upload_stream(futures_util::stream::once(async move { Ok(body) })),
             })
             .await;
@@ -1236,6 +1251,7 @@ mod tests {
             key: key("big.bin"),
             content_type: None,
             custom_metadata: Default::default(),
+            object_lock: None,
             initiated_at: chrono::Utc::now(),
             state: record_store_core::MultipartUploadState::Active,
         };
@@ -1293,6 +1309,7 @@ mod tests {
             key: key("big.bin"),
             content_type: None,
             custom_metadata: Default::default(),
+            object_lock: None,
             initiated_at: chrono::Utc::now(),
             state: record_store_core::MultipartUploadState::Active,
         };
@@ -1326,6 +1343,7 @@ mod tests {
             key: key("big.bin"),
             content_type: None,
             custom_metadata: Default::default(),
+            object_lock: None,
             initiated_at: chrono::Utc::now(),
             state: record_store_core::MultipartUploadState::Active,
         };

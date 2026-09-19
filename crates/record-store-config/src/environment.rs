@@ -121,6 +121,24 @@ impl Config {
             self.lifecycle.batch_size =
                 parse_environment("RECORD_STORE_LIFECYCLE_BATCH_SIZE", value)?;
         }
+        if let Some(value) = environment_value(
+            environment,
+            "RECORD_STORE_OBJECT_LOCK_CLOCK_WATERMARK_INTERVAL_SECONDS",
+        )? {
+            self.object_lock.clock_watermark_interval_seconds = parse_environment(
+                "RECORD_STORE_OBJECT_LOCK_CLOCK_WATERMARK_INTERVAL_SECONDS",
+                value,
+            )?;
+        }
+        if let Some(value) = environment_value(
+            environment,
+            "RECORD_STORE_OBJECT_LOCK_CLOCK_BACKWARDS_TOLERANCE_SECONDS",
+        )? {
+            self.object_lock.clock_backwards_tolerance_seconds = parse_environment(
+                "RECORD_STORE_OBJECT_LOCK_CLOCK_BACKWARDS_TOLERANCE_SECONDS",
+                value,
+            )?;
+        }
         if let Some(value) = environment_value(environment, "RECORD_STORE_SHARING_SHARES_ENABLED")?
         {
             self.sharing.shares_enabled =
@@ -451,6 +469,14 @@ mod exhaustive_tests {
             ("RECORD_STORE_WEBHOOK_TIMEOUT_SECONDS", "9".into()),
             ("RECORD_STORE_WEBHOOK_MAXIMUM_ATTEMPTS", "7".into()),
             ("RECORD_STORE_WEBHOOK_POLL_INTERVAL_SECONDS", "11".into()),
+            (
+                "RECORD_STORE_OBJECT_LOCK_CLOCK_WATERMARK_INTERVAL_SECONDS",
+                "120".into(),
+            ),
+            (
+                "RECORD_STORE_OBJECT_LOCK_CLOCK_BACKWARDS_TOLERANCE_SECONDS",
+                "7".into(),
+            ),
             ("RECORD_STORE_LIFECYCLE_INTERVAL_SECONDS", "600".into()),
             ("RECORD_STORE_LIFECYCLE_BATCH_SIZE", "250".into()),
             ("RECORD_STORE_SHARING_SHARES_ENABLED", "true".into()),
@@ -592,6 +618,9 @@ mod exhaustive_tests {
 
         assert_eq!(config.lifecycle.interval_seconds, 600);
         assert_eq!(config.lifecycle.batch_size, 250);
+
+        assert_eq!(config.object_lock.clock_watermark_interval_seconds, 120);
+        assert_eq!(config.object_lock.clock_backwards_tolerance_seconds, 7);
 
         assert!(config.sharing.shares_enabled);
         assert!(config.sharing.embeds_enabled);

@@ -5,12 +5,14 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
+use record_store_audit::AuditRepository;
 use record_store_core::{BucketId, OrganizationId};
 use record_store_events::EventRepository;
 use record_store_metadata::MetadataRepository;
 use record_store_storage::ObjectStore;
 use tokio::sync::{RwLock, Semaphore};
 
+use crate::lock::LockPolicy;
 use crate::*;
 
 #[derive(Default)]
@@ -38,6 +40,8 @@ pub struct Services {
     pub buckets: Arc<BucketService>,
     /// Object lifecycle service.
     pub objects: Arc<ObjectService>,
+    /// Object Lock retention and legal-hold service.
+    pub locks: Arc<ObjectLockService>,
     /// Low-cardinality service metrics.
     pub metrics: Arc<ServiceMetrics>,
 }
@@ -63,9 +67,40 @@ impl Services {
         limits: ServiceLimits,
         events: Option<Arc<dyn EventRepository>>,
     ) -> Self {
+        Self::build(storage, metadata, owner, limits, events, None)
+    }
+
+    /// Constructs services with a durable audit trail for Object Lock bypasses.
+    ///
+    /// A governance bypass is the one way a retained version leaves before its
+    /// date, so the deployment that enables Object Lock wants it recorded.
+    #[must_use]
+    pub fn new_with_audit(
+        storage: Arc<dyn ObjectStore>,
+        metadata: Arc<dyn MetadataRepository>,
+        owner: OrganizationId,
+        limits: ServiceLimits,
+        events: Option<Arc<dyn EventRepository>>,
+        audit: Arc<dyn AuditRepository>,
+    ) -> Self {
+        Self::build(storage, metadata, owner, limits, events, Some(audit))
+    }
+
+    fn build(
+        storage: Arc<dyn ObjectStore>,
+        metadata: Arc<dyn MetadataRepository>,
+        owner: OrganizationId,
+        limits: ServiceLimits,
+        events: Option<Arc<dyn EventRepository>>,
+        audit: Option<Arc<dyn AuditRepository>>,
+    ) -> Self {
         let coordinator = Arc::new(BucketCoordinator::default());
         let operations = Arc::new(Semaphore::new(limits.maximum_concurrent_operations));
         let metrics = Arc::new(ServiceMetrics::default());
+        let policy = Arc::new(LockPolicy {
+            clock_tolerance_seconds: limits.object_lock.clock_backwards_tolerance_seconds,
+            audit,
+        });
         Self {
             buckets: Arc::new(BucketService {
                 metadata: Arc::clone(&metadata),
@@ -77,13 +112,21 @@ impl Services {
             }),
             objects: Arc::new(ObjectService {
                 storage,
-                metadata,
-                coordinator,
-                operations,
+                metadata: Arc::clone(&metadata),
+                coordinator: Arc::clone(&coordinator),
+                operations: Arc::clone(&operations),
                 metrics: Arc::clone(&metrics),
                 maximum_custom_metadata_entries: limits.maximum_custom_metadata_entries,
                 maximum_custom_metadata_bytes: limits.maximum_custom_metadata_bytes,
                 events,
+                policy: Arc::clone(&policy),
+            }),
+            locks: Arc::new(ObjectLockService {
+                metadata,
+                coordinator,
+                operations,
+                metrics: Arc::clone(&metrics),
+                policy,
             }),
             metrics,
         }
@@ -99,4 +142,23 @@ pub struct ServiceLimits {
     pub maximum_custom_metadata_entries: usize,
     /// Maximum aggregate custom metadata bytes.
     pub maximum_custom_metadata_bytes: usize,
+    /// Object Lock clock settings.
+    pub object_lock: ObjectLockLimits,
+}
+
+/// How far the wall clock may drift before retention decisions stop.
+#[derive(Debug, Clone, Copy)]
+pub struct ObjectLockLimits {
+    /// How far behind the observed high-water mark the clock may fall before
+    /// Object Lock refuses to release anything. This absorbs ordinary NTP
+    /// correction; a jump is meant to trip it.
+    pub clock_backwards_tolerance_seconds: u32,
+}
+
+impl Default for ObjectLockLimits {
+    fn default() -> Self {
+        Self {
+            clock_backwards_tolerance_seconds: 5,
+        }
+    }
 }

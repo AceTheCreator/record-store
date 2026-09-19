@@ -37,6 +37,7 @@ async fn create_fixture(encrypted: bool) -> Fixture {
         quota: BucketQuota::default(),
         storage_class: None,
         durability_policy: None,
+        object_lock: None,
         cors: None,
     };
     repository
@@ -73,6 +74,7 @@ fn request(bucket_id: BucketId, key: &str, payload: Bytes) -> PutObjectRequest {
         expected_checksum: None,
         object_id: None,
         protocol_etag: None,
+        object_lock: None,
         body: upload_stream(stream::once(async move { Ok(payload) })),
     }
 }

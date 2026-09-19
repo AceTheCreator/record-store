@@ -1,6 +1,6 @@
 //! Shared bucket and object application services.
 
-use record_store_core::{CoreError, VersionId};
+use record_store_core::{CoreError, LockBlock, LockChangeRefused, VersionId};
 use record_store_metadata::MetadataError;
 use record_store_storage::StorageError;
 use thiserror::Error;
@@ -41,6 +41,27 @@ pub enum ServiceError {
     /// Storage quota would be exceeded.
     #[error("storage quota exceeded")]
     QuotaExceeded,
+    /// Object Lock still holds the version the caller wanted to remove.
+    #[error("object version is held by {}", .0.label())]
+    ObjectLocked(LockBlock),
+    /// The requested lock change would have released a protected version.
+    #[error("object lock change refused: {}", .0.label())]
+    ObjectLockChangeRefused(LockChangeRefused),
+    /// The bucket does not have Object Lock enabled.
+    #[error("object lock is not enabled on this bucket")]
+    ObjectLockNotEnabled,
+    /// The bucket has Object Lock enabled but no configuration to report.
+    #[error("object lock configuration was not found")]
+    ObjectLockConfigurationNotFound,
+    /// Object Lock requires version history, so versioning cannot be suspended.
+    #[error("bucket versioning cannot be suspended while object lock is enabled")]
+    ObjectLockRequiresVersioning,
+    /// Wall-clock time is behind the recorded high-water mark, so no retention
+    /// decision that would release an object can be trusted right now.
+    #[error(
+        "retention cannot be evaluated: the system clock is behind the recorded high-water mark"
+    )]
+    RetentionClockUnavailable,
     /// Custom metadata exceeded a configured bound.
     #[error("custom metadata exceeds configured limits")]
     MetadataTooLarge,
@@ -77,6 +98,18 @@ pub(crate) fn map_metadata(error: MetadataError) -> ServiceError {
         MetadataError::BucketNotEmpty => ServiceError::BucketNotEmpty,
         MetadataError::MultipartUploadNotFound => ServiceError::MultipartUploadNotFound,
         MetadataError::QuotaExceeded => ServiceError::QuotaExceeded,
+        MetadataError::VersionLocked(block) => ServiceError::ObjectLocked(block),
+        MetadataError::ObjectLockChangeRefused(reason) => {
+            ServiceError::ObjectLockChangeRefused(reason)
+        }
+        MetadataError::ObjectLockNotEnabled => ServiceError::ObjectLockNotEnabled,
+        MetadataError::ObjectLockVersionNotFound => ServiceError::ObjectNotFound,
+        MetadataError::ObjectLockRequiresVersioning
+        | MetadataError::ObjectLockNotEnabledAtCreation => {
+            ServiceError::ObjectLockRequiresVersioning
+        }
+        MetadataError::ClockWentBackwards => ServiceError::RetentionClockUnavailable,
+        MetadataError::InvalidObjectLock(reason) => ServiceError::InvalidRequest(reason),
         error => ServiceError::Metadata(error),
     }
 }
@@ -90,6 +123,20 @@ pub(crate) fn map_storage(error: StorageError) -> ServiceError {
             ServiceError::MultipartUploadNotFound
         }
         StorageError::Metadata(MetadataError::QuotaExceeded) => ServiceError::QuotaExceeded,
+        // Object Lock is enforced inside the metadata transaction, so on the
+        // delete path it surfaces wrapped in a storage error. Left unmapped it
+        // would reach the client as a 500, telling them to retry something that
+        // is meant never to succeed.
+        StorageError::Metadata(error @ MetadataError::VersionLocked(_))
+        | StorageError::Metadata(error @ MetadataError::ClockWentBackwards)
+        | StorageError::Metadata(error @ MetadataError::ObjectLockChangeRefused(_))
+        | StorageError::Metadata(error @ MetadataError::ObjectLockNotEnabled)
+        | StorageError::Metadata(error @ MetadataError::ObjectLockVersionNotFound)
+        | StorageError::Metadata(error @ MetadataError::ObjectLockRequiresVersioning)
+        | StorageError::Metadata(error @ MetadataError::ObjectLockNotEnabledAtCreation)
+        | StorageError::Metadata(error @ MetadataError::InvalidObjectLock(_)) => {
+            map_metadata(error)
+        }
         StorageError::ClusterUnavailable(reason) => ServiceError::ClusterUnavailable(reason),
         StorageError::NoHealthyReplica => {
             ServiceError::ClusterUnavailable(StorageError::NoHealthyReplica.to_string())

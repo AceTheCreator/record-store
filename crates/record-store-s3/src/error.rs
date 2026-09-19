@@ -5,6 +5,7 @@ use axum::{
     },
     response::{IntoResponse, Response},
 };
+use record_store_core::{LockBlock, LockChangeRefused, RetentionMode};
 use record_store_service::ServiceError;
 use serde::Serialize;
 
@@ -27,6 +28,30 @@ pub(crate) fn service_error(
         ServiceError::InvalidPartOrder => S3ErrorKind::InvalidPartOrder,
         ServiceError::EntityTooSmall => S3ErrorKind::EntityTooSmall,
         ServiceError::QuotaExceeded => S3ErrorKind::QuotaExceeded,
+        // Every one of these answers 403 AccessDenied, which is the code an S3
+        // client branches on. The distinct message is what tells the operator
+        // which of the three it was, and whether anything could have changed it.
+        ServiceError::ObjectLocked(LockBlock::LegalHold) => S3ErrorKind::ObjectUnderLegalHold,
+        ServiceError::ObjectLocked(LockBlock::Retention {
+            mode: RetentionMode::Compliance,
+            ..
+        })
+        | ServiceError::ObjectLockChangeRefused(LockChangeRefused::ComplianceRetentionIsFinal) => {
+            S3ErrorKind::ObjectUnderComplianceRetention
+        }
+        ServiceError::ObjectLocked(LockBlock::Retention {
+            mode: RetentionMode::Governance,
+            ..
+        })
+        | ServiceError::ObjectLockChangeRefused(LockChangeRefused::GovernanceBypassRequired) => {
+            S3ErrorKind::ObjectUnderGovernanceRetention
+        }
+        ServiceError::ObjectLockNotEnabled => S3ErrorKind::ObjectLockNotEnabled,
+        ServiceError::ObjectLockConfigurationNotFound => {
+            S3ErrorKind::ObjectLockConfigurationNotFound
+        }
+        ServiceError::ObjectLockRequiresVersioning => S3ErrorKind::InvalidBucketState,
+        ServiceError::RetentionClockUnavailable => S3ErrorKind::RetentionClockUnavailable,
         ServiceError::Core(_) => S3ErrorKind::InvalidRequest,
         ServiceError::MetadataTooLarge | ServiceError::InvalidRequest(_) => {
             S3ErrorKind::InvalidRequest
@@ -99,6 +124,14 @@ pub(crate) enum S3ErrorKind {
     RequestTimeTooSkewed,
     NoSuchBucket,
     NoSuchCorsConfiguration,
+    ObjectLockConfigurationNotFound,
+    NoSuchObjectLockConfiguration,
+    ObjectLockNotEnabled,
+    ObjectUnderLegalHold,
+    ObjectUnderGovernanceRetention,
+    ObjectUnderComplianceRetention,
+    RetentionClockUnavailable,
+    InvalidBucketState,
     NoSuchKey,
     NoSuchUpload,
     BucketAlreadyExists,
@@ -130,6 +163,14 @@ impl S3ErrorKind {
             Self::RequestTimeTooSkewed => "RequestTimeTooSkewed",
             Self::NoSuchBucket => "NoSuchBucket",
             Self::NoSuchCorsConfiguration => "NoSuchCORSConfiguration",
+            Self::ObjectLockConfigurationNotFound => "ObjectLockConfigurationNotFoundError",
+            Self::NoSuchObjectLockConfiguration => "NoSuchObjectLockConfiguration",
+            Self::ObjectLockNotEnabled => "InvalidRequest",
+            Self::ObjectUnderLegalHold
+            | Self::ObjectUnderGovernanceRetention
+            | Self::ObjectUnderComplianceRetention => "AccessDenied",
+            Self::RetentionClockUnavailable => "ServiceUnavailable",
+            Self::InvalidBucketState => "InvalidBucketState",
             Self::NoSuchKey => "NoSuchKey",
             Self::NoSuchUpload => "NoSuchUpload",
             Self::BucketAlreadyExists => "BucketAlreadyExists",
@@ -161,6 +202,30 @@ impl S3ErrorKind {
             }
             Self::NoSuchBucket => "The specified bucket does not exist",
             Self::NoSuchCorsConfiguration => "The CORS configuration does not exist",
+            Self::ObjectLockConfigurationNotFound => {
+                "Object Lock is not enabled on this bucket. It can only be enabled when the bucket is created."
+            }
+            Self::NoSuchObjectLockConfiguration => {
+                "The specified object version has no Object Lock configuration"
+            }
+            Self::ObjectLockNotEnabled => {
+                "Object Lock is not enabled on this bucket, so retention and legal holds cannot be set on its objects"
+            }
+            Self::ObjectUnderLegalHold => {
+                "The object version is under a legal hold. Remove the legal hold before deleting it; no bypass applies to a legal hold."
+            }
+            Self::ObjectUnderGovernanceRetention => {
+                "The object version is under GOVERNANCE retention. Retry with x-amz-bypass-governance-retention: true using a credential holding s3:BypassGovernanceRetention."
+            }
+            Self::ObjectUnderComplianceRetention => {
+                "The object version is under COMPLIANCE retention. It cannot be deleted or shortened before its retain-until date by anyone, including the root credential."
+            }
+            Self::RetentionClockUnavailable => {
+                "The system clock is behind the recorded high-water mark, so Object Lock will not release a retained version. Correct the clock and retry."
+            }
+            Self::InvalidBucketState => {
+                "The request is not valid for the current state of the bucket"
+            }
             Self::NoSuchKey => "The specified key does not exist",
             Self::NoSuchUpload => "The specified multipart upload does not exist",
             Self::BucketAlreadyExists => "The requested bucket name is not available",
@@ -194,19 +259,26 @@ impl S3ErrorKind {
             Self::AccessDenied
             | Self::InvalidAccessKeyId
             | Self::SignatureDoesNotMatch
-            | Self::RequestTimeTooSkewed => StatusCode::FORBIDDEN,
+            | Self::RequestTimeTooSkewed
+            | Self::ObjectUnderLegalHold
+            | Self::ObjectUnderGovernanceRetention
+            | Self::ObjectUnderComplianceRetention => StatusCode::FORBIDDEN,
             Self::NoSuchBucket
             | Self::NoSuchCorsConfiguration
             | Self::NoSuchKey
-            | Self::NoSuchUpload => StatusCode::NOT_FOUND,
+            | Self::NoSuchUpload
+            | Self::ObjectLockConfigurationNotFound
+            | Self::NoSuchObjectLockConfiguration => StatusCode::NOT_FOUND,
             Self::BucketAlreadyExists => StatusCode::CONFLICT,
-            Self::BucketNotEmpty => StatusCode::CONFLICT,
+            Self::BucketNotEmpty | Self::InvalidBucketState => StatusCode::CONFLICT,
             Self::InvalidRange => StatusCode::RANGE_NOT_SATISFIABLE,
             Self::PreconditionFailed => StatusCode::PRECONDITION_FAILED,
             Self::NotImplemented | Self::StreamingPayloadNotImplemented => {
                 StatusCode::NOT_IMPLEMENTED
             }
-            Self::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::ServiceUnavailable | Self::RetentionClockUnavailable => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
             Self::AuthorizationHeaderMalformed
             | Self::InvalidBucketName
@@ -217,6 +289,7 @@ impl S3ErrorKind {
             | Self::EntityTooSmall
             | Self::QuotaExceeded
             | Self::MalformedXml
+            | Self::ObjectLockNotEnabled
             | Self::BadDigest => StatusCode::BAD_REQUEST,
         }
     }

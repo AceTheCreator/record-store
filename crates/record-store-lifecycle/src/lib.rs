@@ -14,7 +14,7 @@ use record_store_core::{AuditEventId, LifecycleRule, LifecycleRuleId, open_datab
 use record_store_metadata::{
     ListObjectVersionsRequest, ListObjectsRequest, MetadataError, MetadataRepository,
 };
-use record_store_service::{ServiceError, Services};
+use record_store_service::{LockContext, ServiceError, Services};
 use redb::{Database, ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -36,6 +36,9 @@ struct RuleCursor {
 pub struct LifecycleRunResult {
     pub scanned: u64,
     pub expired: u64,
+    /// Versions Object Lock held back. Counted apart from failures because
+    /// nothing went wrong: the rule was simply outranked.
+    pub skipped: u64,
     pub failures: u64,
 }
 
@@ -105,6 +108,7 @@ impl LifecycleWorker {
             let result = self.run_rule(&rule).await?;
             total.scanned = total.scanned.saturating_add(result.scanned);
             total.expired = total.expired.saturating_add(result.expired);
+            total.skipped = total.skipped.saturating_add(result.skipped);
             total.failures = total.failures.saturating_add(result.failures);
         }
         Ok(total)
@@ -138,7 +142,7 @@ impl LifecycleWorker {
                         continue;
                     }
                     match self.run_once().await {
-                    Ok(result) if result.scanned > 0 => info!(scanned = result.scanned, expired = result.expired, failures = result.failures, "lifecycle scan completed"),
+                    Ok(result) if result.scanned > 0 => info!(scanned = result.scanned, expired = result.expired, skipped = result.skipped, failures = result.failures, "lifecycle scan completed"),
                     Ok(_) => {},
                     Err(error) => error!(%error, "lifecycle scan failed"),
                     }
@@ -215,7 +219,16 @@ impl LifecycleWorker {
                     match self
                         .services
                         .objects
-                        .delete_version(&bucket.name, key.clone(), version_id)
+                        .delete_version(
+                            &bucket.name,
+                            key.clone(),
+                            version_id,
+                            // A background scan is not a person exercising a
+                            // permission, so it never carries a governance
+                            // bypass. Expiry gives way to retention, not the
+                            // other way around.
+                            &LockContext::system("lifecycle"),
+                        )
                         .await
                     {
                         Ok(()) => {
@@ -225,6 +238,33 @@ impl LifecycleWorker {
                                 &bucket.name.to_string(),
                                 key.as_str(),
                                 Some(version_id),
+                            )
+                            .await?;
+                        }
+                        // A retained or held version is not a failure: the rule
+                        // and the lock disagree, and the lock wins. The scan
+                        // records why it stepped over this one and carries on,
+                        // because aborting here would stop every later key in
+                        // the bucket from ever expiring.
+                        Err(ServiceError::ObjectLocked(block)) => {
+                            result.skipped = result.skipped.saturating_add(1);
+                            self.audit_lock_skip(
+                                rule,
+                                &bucket.name.to_string(),
+                                key.as_str(),
+                                version_id,
+                                block.label(),
+                            )
+                            .await?;
+                        }
+                        Err(ServiceError::RetentionClockUnavailable) => {
+                            result.skipped = result.skipped.saturating_add(1);
+                            self.audit_lock_skip(
+                                rule,
+                                &bucket.name.to_string(),
+                                key.as_str(),
+                                version_id,
+                                "clock_unavailable",
                             )
                             .await?;
                         }
@@ -240,6 +280,40 @@ impl LifecycleWorker {
         }
         self.write_cursor(rule.id, &cursor).await?;
         Ok(result)
+    }
+
+    /// Records that Object Lock held a version back, naming the rule and why.
+    ///
+    /// An operator looking at a rule that is not expiring anything needs this
+    /// to be a durable record rather than a log line that has rotated away.
+    async fn audit_lock_skip(
+        &self,
+        rule: &LifecycleRule,
+        bucket: &str,
+        key: &str,
+        version_id: record_store_core::VersionId,
+        reason: &str,
+    ) -> Result<(), LifecycleError> {
+        let mut metadata = std::collections::BTreeMap::new();
+        metadata.insert("version_id".into(), version_id.to_string());
+        metadata.insert("rule_id".into(), rule.id.to_string());
+        metadata.insert("rule_prefix".into(), rule.prefix.clone());
+        metadata.insert("reason".into(), reason.to_owned());
+        self.audit
+            .append(&AuditEvent {
+                event_id: AuditEventId::new(),
+                timestamp: Utc::now(),
+                request_id: None,
+                principal: "system:lifecycle".into(),
+                credential_id: None,
+                source_ip: None,
+                operation: "lifecycle.skip-locked-version".into(),
+                resource: format!("bucket:{bucket}/{key}"),
+                result: AuditResult::Denied,
+                metadata,
+            })
+            .await?;
+        Ok(())
     }
 
     async fn audit_expiration(
@@ -344,7 +418,7 @@ mod tests {
         ObjectKey, ObjectMetadata, OrganizationId, VersionId, VersioningState,
     };
     use record_store_metadata::{MetadataRepository, RedbMetadataRepository};
-    use record_store_service::ServiceLimits;
+    use record_store_service::{ObjectLockLimits, ServiceLimits};
     use record_store_storage::{LocalFilesystemStore, ObjectStore};
     use tempfile::tempdir;
 
@@ -366,26 +440,30 @@ mod tests {
             quota: BucketQuota::default(),
             storage_class: None,
             durability_policy: None,
+            object_lock: None,
             cors: None,
         };
         metadata.create_bucket(&bucket).await.expect("bucket");
         let key = ObjectKey::new("expired.txt").expect("key");
         metadata
-            .put_object(&ObjectMetadata {
-                id: ObjectId::new(),
-                bucket_id: bucket.id,
-                key: key.clone(),
-                version_id: VersionId::new(),
-                size: 0,
-                checksum: Checksum::sha256([0_u8; 32]),
-                payload_format: record_store_core::PayloadFormat::Plaintext,
-                durability: record_store_core::DurabilityProfile::Single,
-                etag: ETag::from_md5([0_u8; 16]),
-                content_type: None,
-                custom_metadata: BTreeMap::new(),
-                created_at: Utc::now() - chrono::Duration::days(3),
-                modified_at: Utc::now() - chrono::Duration::days(3),
-            })
+            .put_object(
+                &ObjectMetadata {
+                    id: ObjectId::new(),
+                    bucket_id: bucket.id,
+                    key: key.clone(),
+                    version_id: VersionId::new(),
+                    size: 0,
+                    checksum: Checksum::sha256([0_u8; 32]),
+                    payload_format: record_store_core::PayloadFormat::Plaintext,
+                    durability: record_store_core::DurabilityProfile::Single,
+                    etag: ETag::from_md5([0_u8; 16]),
+                    content_type: None,
+                    custom_metadata: BTreeMap::new(),
+                    created_at: Utc::now() - chrono::Duration::days(3),
+                    modified_at: Utc::now() - chrono::Duration::days(3),
+                },
+                None,
+            )
             .await
             .expect("object metadata");
         metadata
@@ -419,6 +497,7 @@ mod tests {
                 maximum_concurrent_operations: 4,
                 maximum_custom_metadata_entries: 8,
                 maximum_custom_metadata_bytes: 1024,
+                object_lock: ObjectLockLimits::default(),
             },
         );
         let audit = Arc::new(
@@ -493,6 +572,7 @@ mod tests {
                 maximum_concurrent_operations: 4,
                 maximum_custom_metadata_entries: 8,
                 maximum_custom_metadata_bytes: 1024,
+                object_lock: ObjectLockLimits::default(),
             },
         );
 
@@ -545,26 +625,30 @@ mod tests {
             quota: BucketQuota::default(),
             storage_class: None,
             durability_policy: None,
+            object_lock: None,
             cors: None,
         };
         metadata.create_bucket(&bucket).await.expect("bucket");
         let key = ObjectKey::new("old.txt").expect("key");
         metadata
-            .put_object(&ObjectMetadata {
-                id: ObjectId::new(),
-                bucket_id: bucket.id,
-                key: key.clone(),
-                version_id: VersionId::new(),
-                size: 0,
-                checksum: Checksum::sha256([0_u8; 32]),
-                payload_format: record_store_core::PayloadFormat::Plaintext,
-                durability: record_store_core::DurabilityProfile::Single,
-                etag: ETag::from_md5([0_u8; 16]),
-                content_type: None,
-                custom_metadata: BTreeMap::new(),
-                created_at: Utc::now() - chrono::Duration::days(365),
-                modified_at: Utc::now() - chrono::Duration::days(365),
-            })
+            .put_object(
+                &ObjectMetadata {
+                    id: ObjectId::new(),
+                    bucket_id: bucket.id,
+                    key: key.clone(),
+                    version_id: VersionId::new(),
+                    size: 0,
+                    checksum: Checksum::sha256([0_u8; 32]),
+                    payload_format: record_store_core::PayloadFormat::Plaintext,
+                    durability: record_store_core::DurabilityProfile::Single,
+                    etag: ETag::from_md5([0_u8; 16]),
+                    content_type: None,
+                    custom_metadata: BTreeMap::new(),
+                    created_at: Utc::now() - chrono::Duration::days(365),
+                    modified_at: Utc::now() - chrono::Duration::days(365),
+                },
+                None,
+            )
             .await
             .expect("object");
 
@@ -590,6 +674,7 @@ mod tests {
                 maximum_concurrent_operations: 4,
                 maximum_custom_metadata_entries: 8,
                 maximum_custom_metadata_bytes: 1024,
+                object_lock: ObjectLockLimits::default(),
             },
         );
         let lifecycle = LifecycleWorker::open(
@@ -611,6 +696,189 @@ mod tests {
                 .expect("read")
                 .is_some(),
             "an object nobody wrote a rule for must survive"
+        );
+    }
+
+    /// Expiry and retention will eventually disagree about the same version.
+    /// When they do the lock wins, the scan says so durably, and it keeps
+    /// going — aborting here would stop every later key in the bucket from ever
+    /// expiring, turning one retained record into a silent outage for the rule.
+    #[tokio::test]
+    async fn a_retained_version_is_skipped_audited_and_the_scan_continues() {
+        use record_store_core::{
+            ObjectLockConfiguration, ObjectLockState, Retention, RetentionMode,
+        };
+
+        let directory = tempdir().expect("temporary directory");
+        let metadata: Arc<dyn MetadataRepository> = Arc::new(
+            RedbMetadataRepository::open(directory.path().join("catalog.redb"))
+                .await
+                .expect("metadata"),
+        );
+        let bucket = Bucket {
+            id: BucketId::new(),
+            organization_id: OrganizationId::new(),
+            name: BucketName::new("records").expect("bucket"),
+            created_at: Utc::now(),
+            versioning: VersioningState::Enabled,
+            quota: BucketQuota::default(),
+            storage_class: None,
+            durability_policy: None,
+            object_lock: Some(ObjectLockConfiguration::default()),
+            cors: None,
+        };
+        metadata.create_bucket(&bucket).await.expect("bucket");
+
+        let old = Utc::now() - chrono::Duration::days(30);
+        let stored = |key: &str| ObjectMetadata {
+            id: ObjectId::new(),
+            bucket_id: bucket.id,
+            key: ObjectKey::new(key).expect("key"),
+            version_id: VersionId::new(),
+            size: 0,
+            checksum: Checksum::sha256([0_u8; 32]),
+            payload_format: record_store_core::PayloadFormat::Plaintext,
+            durability: record_store_core::DurabilityProfile::Single,
+            etag: ETag::from_md5([0_u8; 16]),
+            content_type: None,
+            custom_metadata: BTreeMap::new(),
+            created_at: old,
+            modified_at: old,
+        };
+
+        // One retained version and one ordinary version, both long past the
+        // expiration age, and both made non-current so the rule considers them.
+        let retained = stored("a-retained.txt");
+        metadata
+            .put_object(
+                &retained,
+                Some(ObjectLockState {
+                    retention: Some(Retention {
+                        mode: RetentionMode::Compliance,
+                        retain_until: Utc::now() + chrono::Duration::days(3_650),
+                    }),
+                    legal_hold: false,
+                }),
+            )
+            .await
+            .expect("retained object");
+        metadata
+            .put_object(&stored("a-retained.txt"), None)
+            .await
+            .expect("supersede the retained version");
+
+        let expirable = stored("b-expirable.txt");
+        metadata
+            .put_object(&expirable, None)
+            .await
+            .expect("expirable object");
+        metadata
+            .put_object(&stored("b-expirable.txt"), None)
+            .await
+            .expect("supersede the expirable version");
+
+        metadata
+            .put_lifecycle_rule(&LifecycleRule {
+                id: LifecycleRuleId::new(),
+                bucket_id: bucket.id,
+                prefix: String::new(),
+                enabled: true,
+                expiration: None,
+                noncurrent_version_expiration: Some(ExpirationDays::new(1).expect("days")),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .expect("rule");
+
+        let storage: Arc<dyn ObjectStore> = Arc::new(
+            LocalFilesystemStore::open(
+                directory.path().join("data"),
+                directory.path().join("tmp"),
+                Arc::clone(&metadata),
+            )
+            .await
+            .expect("storage"),
+        );
+        let audit = Arc::new(
+            RedbAuditRepository::open(directory.path().join("audit.redb"))
+                .await
+                .expect("audit"),
+        );
+        let audit_dependency: Arc<dyn record_store_audit::AuditRepository> = audit.clone();
+        let services = Services::new(
+            storage,
+            Arc::clone(&metadata),
+            bucket.organization_id,
+            ServiceLimits {
+                maximum_concurrent_operations: 4,
+                maximum_custom_metadata_entries: 8,
+                maximum_custom_metadata_bytes: 1024,
+                object_lock: ObjectLockLimits::default(),
+            },
+        );
+        let lifecycle = LifecycleWorker::open(
+            directory.path().join("lifecycle.redb"),
+            Arc::clone(&metadata),
+            services,
+            audit_dependency,
+            Duration::from_secs(60),
+            100,
+        )
+        .await
+        .expect("lifecycle");
+
+        let result = lifecycle.run_once().await.expect("the scan completes");
+        assert_eq!(result.skipped, 1, "the retained version is skipped");
+        assert_eq!(result.failures, 0, "a lock is not a failure");
+        assert_eq!(
+            result.expired, 1,
+            "the scan continued past the retained version and expired the next one"
+        );
+
+        // The retained version is still there; the unretained one is gone.
+        assert!(
+            metadata
+                .get_object_version(bucket.id, &retained.key, retained.version_id)
+                .await
+                .expect("read retained")
+                .is_some(),
+            "a retained version outranks a lifecycle rule"
+        );
+        assert!(
+            metadata
+                .get_object_version(bucket.id, &expirable.key, expirable.version_id)
+                .await
+                .expect("read expirable")
+                .is_none(),
+            "an unretained version still expires"
+        );
+
+        // The skip is durable, and names both the rule and the reason.
+        let page = audit
+            .query(AuditQuery {
+                operation: Some("lifecycle.skip-locked-version".into()),
+                limit: 50,
+                ..AuditQuery::default()
+            })
+            .await
+            .expect("audit query");
+        assert_eq!(page.events.len(), 1, "one skip, one record");
+        let event = &page.events[0];
+        assert_eq!(event.principal, "system:lifecycle");
+        assert_eq!(
+            event.metadata.get("reason").map(String::as_str),
+            Some("compliance_retention"),
+            "the record names why the version was left alone"
+        );
+        assert!(
+            event.metadata.contains_key("rule_id"),
+            "the record names the rule that stepped over it"
+        );
+        assert_eq!(
+            event.metadata.get("version_id").map(String::as_str),
+            Some(retained.version_id.to_string()).as_deref(),
+            "the record names the version by its stable identifier"
         );
     }
 }

@@ -10,6 +10,7 @@ bytes.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 record-store-core = { path = "../record-store-core" }
+record-store-audit = { path = "../record-store-audit" }
 record-store-events = { path = "../record-store-events" }
 record-store-metadata = { path = "../record-store-metadata" }
 record-store-storage = { path = "../record-store-storage" }

@@ -1189,6 +1189,7 @@ mod tests {
             quota: BucketQuota::default(),
             storage_class: None,
             durability_policy: None,
+            object_lock: None,
             cors: None,
         };
         first_metadata
@@ -1207,6 +1208,7 @@ mod tests {
                 expected_checksum: None,
                 object_id: None,
                 protocol_etag: None,
+                object_lock: None,
                 body: upload_stream(stream::once(async {
                     Ok::<Bytes, io::Error>(Bytes::from_static(PAYLOAD))
                 })),

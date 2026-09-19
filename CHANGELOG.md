@@ -9,6 +9,85 @@ publishes, so keep it factual and written for the people upgrading.
 
 ## [Unreleased]
 
+### Added
+
+- **Object Lock, with AWS semantics.** `GOVERNANCE` and `COMPLIANCE` retention, legal
+  holds, per-bucket default retention, and a governance bypass that needs its own policy
+  permission. The S3 surface adds `CreateBucket` with
+  `x-amz-bucket-object-lock-enabled: true`, `Put`/`GetObjectLockConfiguration`,
+  `Put`/`GetObjectRetention`, `Put`/`GetObjectLegalHold`, the
+  `x-amz-object-lock-{mode,retain-until-date,legal-hold}` request headers on `PutObject`
+  and `CreateMultipartUpload`, and the matching response headers on `GetObject` and
+  `HeadObject`.
+
+  Enforcement runs inside the metadata transaction that would remove the version, so a
+  retention placed concurrently cannot be raced. A `COMPLIANCE` retention may only be
+  extended, never shortened or removed, by anyone including the root credential. A
+  `GOVERNANCE` retention yields only to `x-amz-bypass-governance-retention: true`
+  presented by a credential holding the new `s3:BypassGovernanceRetention` permission,
+  and every bypass — successful or refused — writes an audit record. A legal hold blocks
+  deletion independently of retention in both modes, and has no bypass at all.
+
+  Deleting a *version* under retention returns `403 AccessDenied`; placing a delete
+  marker over it stays allowed, because the marker destroys nothing. Overwriting a key
+  publishes a new version and never mutates a locked one.
+
+- New policy actions: `s3:GetObjectRetention`, `s3:PutObjectRetention`,
+  `s3:GetObjectLegalHold`, `s3:PutObjectLegalHold`, and `s3:BypassGovernanceRetention`.
+  Bucket-level Object Lock configuration sits under the existing `s3:ManageBucket`,
+  alongside versioning and CORS. Existing stored policies are unaffected.
+
+- An `[object_lock]` configuration section, with
+  `RECORD_STORE_OBJECT_LOCK_CLOCK_WATERMARK_INTERVAL_SECONDS` (default 60) and
+  `RECORD_STORE_OBJECT_LOCK_CLOCK_BACKWARDS_TOLERANCE_SECONDS` (default 5). Record Store
+  persists a monotonic high-water mark of observed wall-clock time and refuses
+  retention-*releasing* operations with `503 ServiceUnavailable` while the clock is
+  behind it, logging a warning. Reads, ordinary writes, and operations that only add
+  protection keep working. The mark is not substituted for the wall clock, because a
+  single bogus forward jump would then become a permanent licence to delete early.
+
+- `record-store bucket object-lock show|set-default|status`, and the management API
+  routes behind them. Per-object lock state is read-only on the management plane by
+  design: placing or releasing a retention is an S3 action governed by S3 policy, and a
+  second door on port 7601 would make `s3:BypassGovernanceRetention` meaningless. The
+  auditor role may read lock state; the storage-administrator role may set the bucket
+  default.
+
+- Documentation: [Object Lock](docs/administration/object-lock.md) and
+  [Object Lock and Trust](docs/security/object-lock.md). The second says plainly what a
+  retention date does and does not prove — it is enforced by Record Store, not by the
+  filesystem, and it is not evidence against an operator with access to the data
+  directory.
+
+### Changed
+
+- The metadata schema moves from version 4 to 5, adding an Object Lock table and a clock
+  table. The migration is ordered and non-destructive: nothing is rewritten, a v4 bucket
+  decodes with no Object Lock configuration, and a v4 version decodes as unlocked. An
+  existing v4 deployment starts, migrates, and keeps serving every object unchanged.
+
+- The lifecycle worker skips any version under retention or a legal hold, writes an audit
+  record naming the rule and the reason, and continues the scan rather than aborting.
+  `LifecycleRunResult` gains a `skipped` count, kept separate from `failures` because
+  nothing went wrong. A lifecycle scan never carries a governance bypass.
+
+- Bucket versioning can no longer be suspended while Object Lock is enabled
+  (`409 InvalidBucketState`). Suspending it would make the next write replace the null
+  version in place, which is the history a retained version is meant to be safe from.
+
+- Object Lock cannot be enabled on an existing bucket. This is deliberate and stricter
+  than current AWS: enabling it later would claim protection over versions that were
+  written without it.
+
+- `x-amz-object-lock-mode`, `x-amz-object-lock-retain-until-date`, and
+  `x-amz-object-lock-legal-hold` are now honoured rather than rejected. Any *other*
+  `x-amz-object-lock-*` header is still an unimplemented semantic and still returns
+  `NotImplemented`.
+
+- Lock errors reaching the S3 surface through the delete path now return their intended
+  status. They previously would have surfaced as `500 InternalError`, telling a client to
+  retry something meant never to succeed.
+
 ## [0.1.3] - 2026-09-16
 
 A patch release that prepares every database for the next one. It changes no

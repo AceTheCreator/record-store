@@ -15,7 +15,7 @@ use record_store_auth::CredentialManager;
 use record_store_core::OrganizationId;
 use record_store_events::{EventRepository, RedbEventRepository};
 use record_store_metadata::{MetadataRepository, RedbMetadataRepository};
-use record_store_service::{ServiceLimits, Services};
+use record_store_service::{ObjectLockLimits, ServiceLimits, Services};
 use record_store_storage::{DeviceStore, LocalFilesystemStore, ObjectStore};
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -93,6 +93,7 @@ pub(crate) async fn api() -> (TempDir, Router) {
             maximum_concurrent_operations: 8,
             maximum_custom_metadata_entries: 8,
             maximum_custom_metadata_bytes: 1_024,
+            object_lock: ObjectLockLimits::default(),
         },
     );
     let state = AppState::new(
@@ -432,6 +433,7 @@ pub(crate) async fn clustered_api() -> (TempDir, Router) {
             maximum_concurrent_operations: 8,
             maximum_custom_metadata_entries: 8,
             maximum_custom_metadata_bytes: 1_024,
+            object_lock: ObjectLockLimits::default(),
         },
     );
 

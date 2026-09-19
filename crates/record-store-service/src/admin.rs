@@ -76,6 +76,11 @@ impl ObjectService {
                 expected_checksum: Some(source.metadata.checksum),
                 object_id: None,
                 protocol_etag: None,
+                // A copy is a new version in the destination bucket, so it is
+                // born under that bucket's default retention like any other
+                // write. The source version's lock is not carried over: it
+                // protects that version, not this new one.
+                object_lock: ObjectLockService::initial_state(&destination_bucket, None)?,
                 body: upload_stream(body),
             })
             .await
@@ -302,6 +307,7 @@ mod tests {
             maximum_concurrent_operations: 4,
             maximum_custom_metadata_entries: entries,
             maximum_custom_metadata_bytes: bytes,
+            object_lock: crate::ObjectLockLimits::default(),
         }
     }
 

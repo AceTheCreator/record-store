@@ -58,6 +58,10 @@ const CLASSIFIED: &[(&str, Audience)] = &[
     ("/api/v1/buckets/{}/objects", Audience::Console),
     ("/api/v1/buckets/{}/quota", Audience::Console),
     ("/api/v1/buckets/{}/versioning", Audience::ConsoleAndCli),
+    // Object Lock has no console screen yet; it is administered from the CLI
+    // and the S3 surface.
+    ("/api/v1/buckets/{}/object-lock", Audience::Cli),
+    ("/api/v1/buckets/{}/object-lock/{}", Audience::Cli),
     ("/api/v1/cluster", Audience::ConsoleAndCli),
     // The console's Drives screen lists devices and drives their lifecycle; the
     // CLI covers the same ground for automation.

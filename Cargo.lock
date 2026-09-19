@@ -2406,6 +2406,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures-util",
+ "record-store-audit",
  "record-store-core",
  "record-store-events",
  "record-store-metadata",

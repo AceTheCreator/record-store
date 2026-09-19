@@ -514,6 +514,7 @@ impl Harness {
             quota: BucketQuota::default(),
             storage_class: None,
             durability_policy: None,
+            object_lock: None,
             cors: None,
         };
         metadata
@@ -566,6 +567,7 @@ impl Harness {
                 expected_checksum: None,
                 object_id: None,
                 protocol_etag: None,
+                object_lock: None,
                 body: upload_stream(futures_util::stream::once(async move { Ok(chunk) })),
             })
             .await
@@ -2588,6 +2590,7 @@ async fn a_bucket_storage_class_resolves_to_a_policy_or_is_reported() {
         quota: BucketQuota::default(),
         storage_class: Some(StorageClass::new("archive").expect("class")),
         durability_policy: None,
+        object_lock: None,
         cors: None,
     };
     metadata.create_bucket(&archived).await.expect("create");

@@ -245,6 +245,22 @@ impl Config {
         if self.lifecycle.batch_size == 0 || self.lifecycle.batch_size > 1_000 {
             issues.push("lifecycle.batch_size must be between 1 and 1000".to_owned());
         }
+        if self.object_lock.clock_watermark_interval_seconds == 0
+            || self.object_lock.clock_watermark_interval_seconds > 3_600
+        {
+            issues.push(
+                "object_lock.clock_watermark_interval_seconds must be between 1 and 3600"
+                    .to_owned(),
+            );
+        }
+        // A tolerance wide enough to hide a meaningful backwards jump would make
+        // the high-water mark decorative, so it is capped well below the
+        // granularity any retention period is expressed in.
+        if self.object_lock.clock_backwards_tolerance_seconds > 300 {
+            issues.push(
+                "object_lock.clock_backwards_tolerance_seconds must not exceed 300".to_owned(),
+            );
+        }
         issues.extend(self.sharing.issues());
         if self.observability.log_filter.trim().is_empty() {
             issues.push("observability.log_filter must not be empty".to_owned());
@@ -517,5 +533,26 @@ path = "/mnt/hdd0"
         let mut config = valid_config();
         config.cluster.tls.certificate_path = Some(PathBuf::from("/tmp/cert.pem"));
         assert!(config.validate().is_err());
+    }
+
+    /// A tolerance wide enough to hide a meaningful backwards jump would make
+    /// the high-water mark decorative, so the bound is enforced rather than
+    /// trusted to the operator.
+    #[test]
+    fn object_lock_clock_settings_are_bounded() {
+        let mut config = Config::load_with_environment(None, credentials()).expect("configuration");
+        config.object_lock.clock_backwards_tolerance_seconds = 301;
+        assert!(config.validate().is_err());
+
+        config.object_lock.clock_backwards_tolerance_seconds = 300;
+        assert!(config.validate().is_ok());
+
+        // Zero would mean the mark never advances on its own.
+        config.object_lock.clock_watermark_interval_seconds = 0;
+        assert!(config.validate().is_err());
+        config.object_lock.clock_watermark_interval_seconds = 3_601;
+        assert!(config.validate().is_err());
+        config.object_lock.clock_watermark_interval_seconds = 60;
+        assert!(config.validate().is_ok());
     }
 }

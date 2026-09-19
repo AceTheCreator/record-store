@@ -20,6 +20,7 @@ tests.
 | `CopyObject` | Server-side copy |
 | `RangeAndConditionalReads` | `Range`, `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since` |
 | `ClientSha256Checksums` | `x-amz-content-sha256` |
+| `ObjectLock` | Retention (`GOVERNANCE`/`COMPLIANCE`), legal holds, bucket defaults, governance bypass |
 
 ## Unsupported
 
@@ -28,7 +29,6 @@ tests.
 | `UploadPartCopy` | Download and re-upload the part |
 | `ServerSideEncryptionHeaders` | [Encryption](../security/encryption.md) is a deployment setting, not per request |
 | `AccessControlLists` | [Policies](../administration/policies.md) |
-| `ObjectLock` | Versioning plus a deny policy on `s3:DeleteObjectVersion` |
 | `AwsChunkedEncoding` | Configure the SDK to send unsigned or fully-signed payloads |
 
 Requests for an unsupported operation return `501 NotImplemented`.

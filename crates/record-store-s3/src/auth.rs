@@ -147,16 +147,11 @@ pub(crate) async fn append_s3_audit(
     status: StatusCode,
 ) {
     let Some(audit) = &state.audit else { return };
-    let (principal, credential_id) = principal.map_or_else(
-        || ("anonymous".to_owned(), None),
-        |principal| match principal {
-            Principal::ServiceAccount {
-                id, credential_id, ..
-            } => (format!("service_account:{id}"), *credential_id),
-            Principal::System { component } => (format!("system:{component}"), None),
-            Principal::Anonymous => ("anonymous".into(), None),
-        },
-    );
+    let credential_id = principal.and_then(|principal| match principal {
+        Principal::ServiceAccount { credential_id, .. } => *credential_id,
+        Principal::System { .. } | Principal::Anonymous => None,
+    });
+    let principal = principal_name(principal);
     let result = match status {
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => AuditResult::Denied,
         status if status.is_success() => AuditResult::Success,
@@ -176,6 +171,19 @@ pub(crate) async fn append_s3_audit(
     };
     if let Err(error) = audit.append(&event).await {
         tracing::error!(%error, request_id = %request_id.0, "durable S3 audit append failed");
+    }
+}
+
+/// Renders a principal the way every durable record names it.
+///
+/// Audit records and Object Lock bypass records have to agree on this: an
+/// operator correlating the two would otherwise be matching two spellings of
+/// the same caller. It never contains credential material.
+pub(crate) fn principal_name(principal: Option<&Principal>) -> String {
+    match principal {
+        Some(Principal::ServiceAccount { id, .. }) => format!("service_account:{id}"),
+        Some(Principal::System { component }) => format!("system:{component}"),
+        Some(Principal::Anonymous) | None => "anonymous".to_owned(),
     }
 }
 
@@ -320,16 +328,33 @@ pub(crate) fn request_permissions(request: &Request) -> Result<Vec<Permission>, 
         .split_once('/')
         .map_or((path, None), |(bucket, key)| (bucket, Some(key)));
     let query = query_map(request.uri().query())?;
+    let reading = request.method() == Method::GET || request.method() == Method::HEAD;
     let action = if key.is_none() {
-        if request.method() == Method::GET
+        // Bucket Object Lock configuration sits with versioning and CORS under
+        // the one coarse bucket-administration permission, because the three
+        // are the same kind of decision about the same object.
+        if reading
             && !query.contains_key("versioning")
             && !query.contains_key("cors")
+            && !query.contains_key("object-lock")
         {
             Action::ListBucket
         } else {
             Action::ManageBucket
         }
-    } else if request.method() == Method::GET || request.method() == Method::HEAD {
+    } else if query.contains_key("retention") {
+        if reading {
+            Action::GetObjectRetention
+        } else {
+            Action::PutObjectRetention
+        }
+    } else if query.contains_key("legal-hold") {
+        if reading {
+            Action::GetObjectLegalHold
+        } else {
+            Action::PutObjectLegalHold
+        }
+    } else if reading {
         if query.contains_key("versionId") {
             Action::GetObjectVersion
         } else {
@@ -348,7 +373,26 @@ pub(crate) fn request_permissions(request: &Request) -> Result<Vec<Permission>, 
         || format!("bucket:{bucket}"),
         |key| format!("bucket:{bucket}/{key}"),
     );
-    let mut permissions = vec![Permission { action, resource }];
+    let mut permissions = vec![Permission {
+        action,
+        resource: resource.clone(),
+    }];
+    // Asking to override a governance retention is its own permission on top of
+    // whatever the request was already going to do. Requiring it here means a
+    // handler can treat the header's presence as an authorized bypass, because
+    // an unauthorized caller is refused before any handler runs.
+    if key.is_some()
+        && request
+            .headers()
+            .get("x-amz-bypass-governance-retention")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+    {
+        permissions.push(Permission {
+            action: Action::BypassGovernanceRetention,
+            resource,
+        });
+    }
     if let Some(source) = request
         .headers()
         .get("x-amz-copy-source")
@@ -778,5 +822,116 @@ mod tests {
             xml_value(&body_text(revoked).await, "Code"),
             Some("AccessDenied")
         );
+    }
+
+    /// A governance bypass is a permission, not a header. A caller who may
+    /// delete versions but was never granted the bypass must not be able to
+    /// overrule a retention simply by asking.
+    #[tokio::test]
+    async fn presenting_a_governance_bypass_requires_the_bypass_permission() {
+        let (_directory, application, credentials) = test_router().await;
+        make_locked_bucket(&application, "records").await;
+        let until =
+            (Utc::now() + Duration::days(30)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let version = put_returning_version(
+            &application,
+            "records",
+            "draft.txt",
+            b"hello",
+            &[
+                ("x-amz-object-lock-mode", "GOVERNANCE"),
+                ("x-amz-object-lock-retain-until-date", &until),
+            ],
+        )
+        .await;
+
+        // Everything an ordinary writer needs, deliberately without the bypass.
+        let ordinary_actions = vec![
+            Action::ListBucket,
+            Action::GetObject,
+            Action::PutObject,
+            Action::DeleteObject,
+            Action::GetObjectVersion,
+            Action::DeleteObjectVersion,
+            Action::ManageBucket,
+            Action::GetObjectRetention,
+            Action::PutObjectRetention,
+        ];
+        let issued = credentials
+            .create_service_account("lock-test-client", OrganizationId::new())
+            .await
+            .expect("issue service account");
+        let policy = credentials
+            .create_policy(
+                "lock-test-no-bypass",
+                "delete versions, but never overrule a retention",
+                vec![PolicyStatement {
+                    effect: PolicyEffect::Allow,
+                    actions: ordinary_actions.clone(),
+                    resources: vec!["bucket:*".into()],
+                }],
+            )
+            .await
+            .expect("create policy");
+        credentials
+            .attach_policy(issued.info.account.id, policy.id)
+            .await
+            .expect("attach policy");
+        let secret = std::str::from_utf8(issued.secret.expose())
+            .expect("secret text")
+            .to_owned();
+
+        let without_permission = application
+            .clone()
+            .oneshot(signed_request(
+                Method::DELETE,
+                &format!("/records/draft.txt?versionId={version}"),
+                b"",
+                &[("x-amz-bypass-governance-retention", "true")],
+                &issued.info.credential.key_id,
+                &secret,
+                Utc::now(),
+            ))
+            .await
+            .expect("bypass without permission");
+        assert_eq!(
+            without_permission.status(),
+            StatusCode::FORBIDDEN,
+            "the bypass header is refused before any handler runs"
+        );
+
+        // The same caller, once granted the bypass action, succeeds.
+        let mut with_bypass = ordinary_actions;
+        with_bypass.push(Action::BypassGovernanceRetention);
+        let elevated = credentials
+            .create_policy(
+                "lock-test-with-bypass",
+                "may overrule a governance retention",
+                vec![PolicyStatement {
+                    effect: PolicyEffect::Allow,
+                    actions: with_bypass,
+                    resources: vec!["bucket:*".into()],
+                }],
+            )
+            .await
+            .expect("create elevated policy");
+        credentials
+            .attach_policy(issued.info.account.id, elevated.id)
+            .await
+            .expect("attach elevated policy");
+
+        let permitted = application
+            .oneshot(signed_request(
+                Method::DELETE,
+                &format!("/records/draft.txt?versionId={version}"),
+                b"",
+                &[("x-amz-bypass-governance-retention", "true")],
+                &issued.info.credential.key_id,
+                &secret,
+                Utc::now(),
+            ))
+            .await
+            .expect("bypass with permission");
+        assert_eq!(permitted.status(), StatusCode::NO_CONTENT);
     }
 }

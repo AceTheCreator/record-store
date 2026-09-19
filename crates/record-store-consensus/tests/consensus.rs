@@ -327,6 +327,7 @@ fn bucket(name: &str) -> Bucket {
         quota: BucketQuota::default(),
         storage_class: None,
         durability_policy: None,
+        object_lock: None,
         cors: None,
     }
 }

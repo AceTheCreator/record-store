@@ -26,7 +26,7 @@ use record_store_events::{
 };
 use record_store_lifecycle::{LifecycleError, LifecycleWorker};
 use record_store_metadata::{MetadataError, MetadataRepository, RedbMetadataRepository};
-use record_store_service::{ServiceLimits, Services};
+use record_store_service::{ObjectLockLimits, ServiceLimits, Services};
 use record_store_sharing::{CapabilityStore, SharingPolicy, SharingService, TicketIssuer};
 use record_store_storage::{LocalFilesystemStore, ObjectStore, StorageError};
 use serde::{Deserialize, Serialize};
@@ -46,6 +46,8 @@ pub struct ServerRuntime {
     lifecycle_worker: LifecycleWorker,
     process_lock: File,
     cleanup_storage: Arc<dyn ObjectStore>,
+    clock_services: Services,
+    clock_watermark_interval: Duration,
     cluster_process: Option<cluster::ClusterProcess>,
 }
 
@@ -73,6 +75,7 @@ impl ServerRuntime {
         let lifecycle_shutdown = cancellation;
         let cleanup_shutdown = lifecycle_shutdown.clone();
         let cluster_shutdown = lifecycle_shutdown.clone();
+        let clock_shutdown = lifecycle_shutdown.clone();
         tokio::try_join!(
             async {
                 record_store_api::serve(
@@ -108,6 +111,15 @@ impl ServerRuntime {
             },
             async {
                 run_payload_cleanup(self.cleanup_storage, cleanup_shutdown).await;
+                Ok::<(), StartupError>(())
+            },
+            async {
+                run_clock_watermark(
+                    self.clock_services,
+                    self.clock_watermark_interval,
+                    clock_shutdown,
+                )
+                .await;
                 Ok::<(), StartupError>(())
             },
             async {
@@ -254,7 +266,7 @@ pub async fn initialize(config: &Config) -> Result<ServerRuntime, StartupError> 
     )?;
 
     let owner = OrganizationId::from_uuid(uuid::Uuid::from_u128(1));
-    let services = Services::new_with_events(
+    let services = Services::new_with_audit(
         Arc::clone(&storage_dependency),
         Arc::clone(&metadata_dependency),
         owner,
@@ -262,8 +274,14 @@ pub async fn initialize(config: &Config) -> Result<ServerRuntime, StartupError> 
             maximum_concurrent_operations: config.limits.maximum_concurrent_operations,
             maximum_custom_metadata_entries: config.limits.maximum_custom_metadata_entries,
             maximum_custom_metadata_bytes: config.limits.maximum_custom_metadata_bytes,
+            object_lock: ObjectLockLimits {
+                clock_backwards_tolerance_seconds: config
+                    .object_lock
+                    .clock_backwards_tolerance_seconds,
+            },
         },
         Some(Arc::clone(&event_dependency)),
+        Arc::clone(&audit_dependency),
     );
     let lifecycle_worker = LifecycleWorker::open(
         config
@@ -384,7 +402,7 @@ pub async fn initialize(config: &Config) -> Result<ServerRuntime, StartupError> 
     let authorizer: Arc<dyn Authorizer> = credentials.clone();
     let credential_provider: Arc<dyn SigningCredentialProvider> = credentials;
     let s3 = record_store_s3::router(
-        record_store_s3::S3State::new(services, credential_provider)
+        record_store_s3::S3State::new(services.clone(), credential_provider)
             .with_authorizer(authorizer)
             .with_audit(audit_dependency)
             .with_root_s3_enabled(config.auth.root_s3_enabled)
@@ -407,6 +425,10 @@ pub async fn initialize(config: &Config) -> Result<ServerRuntime, StartupError> 
         lifecycle_worker,
         process_lock,
         cleanup_storage,
+        clock_services: services,
+        clock_watermark_interval: Duration::from_secs(
+            config.object_lock.clock_watermark_interval_seconds,
+        ),
         cluster_process: cluster_dependencies.map(|dependencies| dependencies.process),
     })
 }
@@ -472,6 +494,32 @@ pub async fn shutdown_signal() {
     }
 
     tracing::info!("shutdown requested");
+}
+
+/// Keeps the observed-time high-water mark moving while the node is idle.
+///
+/// Object Lock judges a retention against the furthest point in time this
+/// deployment has ever seen. Without a ticker that mark would only advance when
+/// somebody happened to write, so a node that sat quiet over a weekend would
+/// have nothing to compare a clock against on Monday.
+async fn run_clock_watermark(
+    services: Services,
+    interval: Duration,
+    cancellation: CancellationToken,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            () = cancellation.cancelled() => return,
+            _ = ticker.tick() => {
+                // A refusal here is the whole point of the mark, and the
+                // service has already logged it. Nothing else to do but keep
+                // checking: the clock may yet be corrected.
+                let _ = services.locks.observe_clock().await;
+            }
+        }
+    }
 }
 
 async fn run_payload_cleanup(storage: Arc<dyn ObjectStore>, cancellation: CancellationToken) {
