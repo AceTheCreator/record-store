@@ -1015,6 +1015,7 @@ pub(crate) fn complete_cleanup_tx(
 #[cfg(test)]
 mod tests {
     use record_store_core::VersioningState;
+    use redb::ReadableDatabase;
     use tempfile::tempdir;
 
     use super::*;

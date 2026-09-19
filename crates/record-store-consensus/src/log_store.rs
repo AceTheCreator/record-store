@@ -25,7 +25,7 @@ use openraft::{
     storage::{LogFlushed, RaftLogStorage},
 };
 use record_store_core::open_database;
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 use crate::types::{ConsensusEntry, MemberId, RecordStoreTypeConfig};
 

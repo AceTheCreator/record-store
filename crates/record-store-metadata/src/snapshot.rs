@@ -209,6 +209,7 @@ pub fn import_tx(
 
 #[cfg(test)]
 mod tests {
+    use redb::ReadableDatabase;
     use tempfile::tempdir;
 
     use super::*;

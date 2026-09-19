@@ -4,7 +4,7 @@ use record_store_core::{
     Bucket, BucketId, DeleteMarker, ObjectId, ObjectKey, ObjectMetadata, ObjectVersionRecord,
     UploadId, UploadedPart, VersionId,
 };
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::de::DeserializeOwned;
 
 use crate::error::{backend, counter_error};

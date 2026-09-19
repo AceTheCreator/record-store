@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use record_store_core::{EventId, VersionId, WebhookId, open_database};
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use reqwest::{Client, Url, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
