@@ -68,13 +68,16 @@ Released versions are recorded in [`CHANGELOG.md`](CHANGELOG.md).
 - `ListObjectsV2` with bounded pagination, prefix, delimiter, and continuation tokens
 - multipart create, streamed part upload, persisted part listing, completion, abort, and upload listing
 - bucket versioning (`Disabled`, `Enabled`, and `Suspended`), immutable version reads/deletes, delete markers, and `ListObjectVersions`
+- Object Lock with AWS semantics: `GOVERNANCE`/`COMPLIANCE` retention, legal holds, per-bucket defaults, and a governance bypass gated on its own policy permission
 - per-bucket CORS configuration, unsigned browser preflights, and CORS headers on matching S3 responses
 - streaming same-bucket and cross-bucket `CopyObject` with `COPY` and `REPLACE` metadata directives
 - bounded, open-ended, and suffix byte ranges
 - `If-Match`, `If-None-Match`, `If-Modified-Since`, and `If-Unmodified-Since`
 - content type, `x-amz-meta-*`, SHA-256 checksum validation, single-part ETags, and multipart ETags
 
-Presigned multipart part uploads use the same canonical SigV4 verifier. ACLs, Object Lock enforcement, `UploadPartCopy`, server-side encryption headers, and AWS's `aws-chunked` trailing-checksum encoding are not implemented. Unsupported operations or semantic headers return S3 XML `NotImplemented`; they are never silently accepted.
+Presigned multipart part uploads use the same canonical SigV4 verifier. ACLs, `UploadPartCopy`, server-side encryption headers, and AWS's `aws-chunked` trailing-checksum encoding are not implemented. Unsupported operations or semantic headers return S3 XML `NotImplemented`; they are never silently accepted.
+
+Object Lock is enforced inside the metadata transaction that would remove a version, so a retention placed concurrently cannot be raced. A `COMPLIANCE` retention binds every caller including the root credential; a `GOVERNANCE` retention yields only to `x-amz-bypass-governance-retention: true` presented by a credential holding `s3:BypassGovernanceRetention`, and every bypass is audited. Object Lock is chosen when a bucket is created and cannot be enabled later, because doing so would claim protection over versions written without it. It is enforced by Record Store rather than by the filesystem: it stops deletions through the API, not someone with access to the data directory — see [Object Lock and Trust](https://openelementslabs.github.io/record-store/security/object-lock/).
 
 ## Architecture and durability
 
@@ -95,7 +98,7 @@ Payloads are immutable and addressed by generated UUIDs. Logical bucket names an
 
 Optional encryption at rest uses a random per-object or per-part data key, chunked AES-256-GCM authenticated encryption, and a master-key-wrapped data key. The payload header persists the algorithm/format version, nonces, logical size, object binding, and a non-secret key reference. Reads and byte ranges remain streaming and authenticate every accessed chunk. Enable it with `RECORD_STORE_STORAGE_ENCRYPTION_ENABLED=true`; the stable `RECORD_STORE_CREDENTIAL_MASTER_KEY` is then mandatory. Existing plaintext objects remain readable when encryption is first enabled, while all new object and multipart payloads are encrypted. Once an encrypted-store marker exists, startup refuses a missing, mismatched, or disabled key configuration rather than making data unreadable silently.
 
-A durable publication journal resolves the payload/metadata crash window on startup. Replaced and deleted payloads use a durable cleanup queue. Multipart completion has durable completing state and startup reconciliation. Metadata schema version 4 uses ordered, non-destructive migrations.
+A durable publication journal resolves the payload/metadata crash window on startup. Replaced and deleted payloads use a durable cleanup queue. Multipart completion has durable completing state and startup reconciliation. Metadata schema version 5 uses ordered, non-destructive migrations.
 
 Local state uses this layout:
 
@@ -230,6 +233,7 @@ cargo run --bin record-store -- status
 cargo run --bin record-store -- bucket list
 cargo run --bin record-store -- bucket create demo
 cargo run --bin record-store -- bucket versioning enable demo
+cargo run --bin record-store -- bucket object-lock show demo
 cargo run --bin record-store -- service-account create my-app
 cargo run --bin record-store -- credential rotate <account-id>
 cargo run --bin record-store -- policy create ./policy.json
@@ -292,6 +296,8 @@ Configuration file values overlay defaults, then environment variables take prec
 | `RECORD_STORE_WEBHOOK_POLL_INTERVAL_SECONDS` | `webhooks.poll_interval_seconds` |
 | `RECORD_STORE_LIFECYCLE_INTERVAL_SECONDS` | `lifecycle.interval_seconds` |
 | `RECORD_STORE_LIFECYCLE_BATCH_SIZE` | `lifecycle.batch_size` |
+| `RECORD_STORE_OBJECT_LOCK_CLOCK_WATERMARK_INTERVAL_SECONDS` | `object_lock.clock_watermark_interval_seconds` |
+| `RECORD_STORE_OBJECT_LOCK_CLOCK_BACKWARDS_TOLERANCE_SECONDS` | `object_lock.clock_backwards_tolerance_seconds` |
 | `RECORD_STORE_SHARING_SHARES_ENABLED` | `sharing.shares_enabled` |
 | `RECORD_STORE_SHARING_EMBEDS_ENABLED` | `sharing.embeds_enabled` |
 | `RECORD_STORE_SHARING_MAXIMUM_LIFETIME_DAYS` | `sharing.maximum_lifetime_days` |

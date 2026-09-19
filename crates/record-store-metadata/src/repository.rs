@@ -3,8 +3,9 @@
 use async_trait::async_trait;
 use record_store_core::{
     Bucket, BucketId, BucketName, BucketQuota, CorsConfiguration, LifecycleRule, LifecycleRuleId,
-    MultipartUpload, ObjectId, ObjectKey, ObjectMetadata, ObjectVersionRecord, PartNumber,
-    StorageUsage, UploadId, UploadedPart, VersionId, VersioningState,
+    MultipartUpload, ObjectId, ObjectKey, ObjectLockConfiguration, ObjectLockState, ObjectMetadata,
+    ObjectVersionRecord, PartNumber, StorageUsage, UploadId, UploadedPart, VersionId,
+    VersioningState,
 };
 
 use crate::*;
@@ -30,10 +31,21 @@ pub trait MetadataRepository: Send + Sync {
         id: BucketId,
         configuration: Option<CorsConfiguration>,
     ) -> Result<Bucket, MetadataError>;
+    /// Replaces the default retention of a bucket that already has Object Lock
+    /// enabled. Lock cannot be turned on here: that happens only at creation.
+    async fn set_bucket_object_lock(
+        &self,
+        id: BucketId,
+        configuration: ObjectLockConfiguration,
+    ) -> Result<Bucket, MetadataError>;
     async fn delete_bucket(&self, name: &BucketName) -> Result<Bucket, MetadataError>;
+    /// Publishes a version together with the Object Lock state it is born
+    /// with, in one transaction, so a crash cannot durably lose the retention a
+    /// write was accepted under.
     async fn put_object(
         &self,
         metadata: &ObjectMetadata,
+        object_lock: Option<ObjectLockState>,
     ) -> Result<ObjectCommitResult, MetadataError>;
     async fn get_object(
         &self,
@@ -61,12 +73,28 @@ pub trait MetadataRepository: Send + Sync {
         key: &ObjectKey,
         marker: NewDeleteMarker,
     ) -> Result<DeleteObjectResult, MetadataError>;
+    /// Permanently removes one version, refusing while Object Lock holds it.
     async fn delete_object_version(
         &self,
         bucket: BucketId,
         key: &ObjectKey,
         version: VersionId,
+        release: LockRelease,
     ) -> Result<Option<DeleteVersionResult>, MetadataError>;
+    /// Returns the Object Lock state of one version. An unlocked version and a
+    /// version that was never locked are the same answer.
+    async fn get_object_lock(&self, version: VersionId) -> Result<ObjectLockState, MetadataError>;
+    /// Replaces the Object Lock state of one version, enforcing the mode rules.
+    async fn put_object_lock(
+        &self,
+        bucket: BucketId,
+        key: &ObjectKey,
+        version: VersionId,
+        requested: ObjectLockState,
+        release: LockRelease,
+    ) -> Result<ObjectLockState, MetadataError>;
+    /// Advances the observed-time high-water mark retention is judged against.
+    async fn observe_clock(&self, release: LockRelease) -> Result<(), MetadataError>;
     async fn list_objects(
         &self,
         request: ListObjectsRequest,

@@ -251,6 +251,35 @@ impl Default for LifecycleConfig {
     }
 }
 
+/// Object Lock clock settings.
+///
+/// A retention date is only as trustworthy as the clock that judges it, so
+/// Record Store remembers the furthest point in time it has ever observed and
+/// stops releasing retained versions when the clock falls behind it. These two
+/// settings decide how often that mark is refreshed and how much ordinary drift
+/// is tolerated before the refusal kicks in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObjectLockConfig {
+    /// Seconds between refreshes of the observed-time high-water mark.
+    ///
+    /// This is what lets an idle deployment still notice a clock that went
+    /// backwards while nothing was being written.
+    pub clock_watermark_interval_seconds: u64,
+    /// Seconds the clock may lag the high-water mark before retention stops
+    /// being released. Ordinary NTP correction fits inside this; a jump does not.
+    pub clock_backwards_tolerance_seconds: u32,
+}
+
+impl Default for ObjectLockConfig {
+    fn default() -> Self {
+        Self {
+            clock_watermark_interval_seconds: 60,
+            clock_backwards_tolerance_seconds: 5,
+        }
+    }
+}
+
 /// Structured logging settings.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]

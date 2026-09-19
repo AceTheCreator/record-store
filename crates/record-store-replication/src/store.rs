@@ -179,6 +179,7 @@ impl DistributedObjectStore {
     async fn commit_object(
         &self,
         metadata: &ObjectMetadata,
+        object_lock: Option<record_store_core::ObjectLockState>,
         placement: &PayloadPlacement,
     ) -> Result<ObjectCommitResult, StorageError> {
         let consensus = self.context.consensus.as_ref().ok_or_else(|| {
@@ -187,6 +188,7 @@ impl DistributedObjectStore {
         let write = ClusterWrite::batch([
             ClusterWrite::metadata(MetadataCommand::PutObject {
                 metadata: Box::new(metadata.clone()),
+                object_lock,
             }),
             ClusterWrite::cluster(ClusterCommand::PutPlacement {
                 placement: Box::new(placement.clone()),
@@ -388,7 +390,10 @@ impl ObjectStore for DistributedObjectStore {
             created_at: now,
             modified_at: now,
         };
-        let commit = match self.commit_object(&metadata, &placement).await {
+        let commit = match self
+            .commit_object(&metadata, request.object_lock, &placement)
+            .await
+        {
             Ok(commit) => commit,
             Err(error) => {
                 // Nothing is visible, so the replicas that were written must be
@@ -622,7 +627,10 @@ impl ObjectStore for DistributedObjectStore {
             created_at: now,
             modified_at: now,
         };
-        let commit = match self.commit_object(&metadata, &placement).await {
+        let commit = match self
+            .commit_object(&metadata, persisted.object_lock, &placement)
+            .await
+        {
             Ok(commit) => commit,
             Err(error) => {
                 rollback(&self.context, object_id, &outcome.durable_devices).await;
@@ -694,7 +702,12 @@ impl ObjectStore for DistributedObjectStore {
         let result = self
             .context
             .metadata
-            .delete_object_version(request.bucket_id, &request.key, request.version_id)
+            .delete_object_version(
+                request.bucket_id,
+                &request.key,
+                request.version_id,
+                request.release,
+            )
             .await?
             .ok_or(StorageError::ObjectNotFound)?;
         if let Some(metadata) = result.cleanup {

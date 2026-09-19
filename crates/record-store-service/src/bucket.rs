@@ -4,7 +4,8 @@ use std::sync::{Arc, atomic::Ordering};
 
 use chrono::Utc;
 use record_store_core::{
-    Bucket, BucketId, BucketName, BucketQuota, CorsConfiguration, OrganizationId, VersioningState,
+    Bucket, BucketId, BucketName, BucketQuota, CorsConfiguration, ObjectLockConfiguration,
+    OrganizationId, VersioningState,
 };
 use record_store_events::{EventRepository, StorageEvent, StorageEventType};
 use record_store_metadata::MetadataRepository;
@@ -41,6 +42,22 @@ impl BucketService {
         name: BucketName,
         storage_class: Option<record_store_core::StorageClass>,
     ) -> Result<Bucket, ServiceError> {
+        self.create_locked(name, storage_class, false).await
+    }
+
+    /// Creates a bucket, optionally with Object Lock enabled for its lifetime.
+    ///
+    /// Object Lock brings versioning with it, because a retention protects
+    /// immutable versions and there is nothing to protect without them. It can
+    /// only be chosen here: enabling it later would claim protection over
+    /// versions that were written without it, so the answer is the bucket's
+    /// whole lifetime or nothing.
+    pub async fn create_locked(
+        &self,
+        name: BucketName,
+        storage_class: Option<record_store_core::StorageClass>,
+        object_lock_enabled: bool,
+    ) -> Result<Bucket, ServiceError> {
         self.metrics.requests.fetch_add(1, Ordering::Relaxed);
         let _permit = self.acquire().await?;
         let bucket = Bucket {
@@ -48,10 +65,15 @@ impl BucketService {
             organization_id: self.owner,
             name,
             created_at: Utc::now(),
-            versioning: VersioningState::Disabled,
+            versioning: if object_lock_enabled {
+                VersioningState::Enabled
+            } else {
+                VersioningState::Disabled
+            },
             quota: BucketQuota::default(),
             storage_class,
             durability_policy: None,
+            object_lock: object_lock_enabled.then(ObjectLockConfiguration::default),
             cors: None,
         };
         self.metadata

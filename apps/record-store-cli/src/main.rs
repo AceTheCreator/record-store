@@ -301,10 +301,66 @@ enum BucketCommand {
         #[command(flatten)]
         endpoint: EndpointArgs,
     },
+    /// Inspect or change Object Lock on a bucket.
+    ///
+    /// Object Lock is enabled when a bucket is created and never afterwards,
+    /// because enabling it later would claim protection over versions that were
+    /// written without it. Create a locked bucket over S3 with
+    /// `x-amz-bucket-object-lock-enabled: true`.
+    ObjectLock {
+        #[command(subcommand)]
+        command: BucketObjectLockCommand,
+    },
     /// Inspect or change bucket versioning.
     Versioning {
         #[command(subcommand)]
         command: BucketVersioningCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum BucketObjectLockCommand {
+    /// Show a bucket's Object Lock configuration.
+    Show {
+        /// Bucket name.
+        name: String,
+        #[command(flatten)]
+        endpoint: EndpointArgs,
+    },
+    /// Replace the default retention applied to new object versions.
+    ///
+    /// The default is materialized onto each version as it is written, so
+    /// changing it never alters a version that already exists.
+    SetDefault {
+        /// Bucket name.
+        name: String,
+        /// Retention mode. COMPLIANCE cannot be shortened or bypassed by
+        /// anyone, including the root credential.
+        #[arg(long, value_parser = ["GOVERNANCE", "COMPLIANCE"])]
+        mode: String,
+        /// Retention period in whole days. Mutually exclusive with --years.
+        #[arg(long, conflicts_with = "years")]
+        days: Option<u16>,
+        /// Retention period in whole years, counted as 365 days each.
+        #[arg(long)]
+        years: Option<u16>,
+        #[command(flatten)]
+        endpoint: EndpointArgs,
+    },
+    /// Show the retention and legal hold on one object version.
+    ///
+    /// Read-only. Placing or releasing a retention is an S3 action governed by
+    /// S3 policy; the management plane deliberately offers no second door to it.
+    Status {
+        /// Bucket name.
+        name: String,
+        /// Object key.
+        key: String,
+        /// Version to inspect. Defaults to the current version.
+        #[arg(long)]
+        version_id: Option<String>,
+        #[command(flatten)]
+        endpoint: EndpointArgs,
     },
 }
 
@@ -750,6 +806,7 @@ async fn bucket(command: BucketCommand, json: bool) -> Result<()> {
             }
         }
         BucketCommand::Versioning { command } => bucket_versioning(command, json).await?,
+        BucketCommand::ObjectLock { command } => bucket_object_lock(command, json).await?,
     }
     Ok(())
 }
@@ -814,6 +871,64 @@ async fn service_account(command: ServiceAccountCommand, json: bool) -> Result<(
         }
     }
     Ok(())
+}
+
+async fn bucket_object_lock(command: BucketObjectLockCommand, json: bool) -> Result<()> {
+    let request = match command {
+        BucketObjectLockCommand::Show { name, endpoint } => client()?.get(api_url(
+            &endpoint,
+            &format!("/api/v1/buckets/{name}/object-lock"),
+        )),
+        BucketObjectLockCommand::SetDefault {
+            name,
+            mode,
+            days,
+            years,
+            endpoint,
+        } => {
+            // Clap's `conflicts_with` rules out naming both; naming neither is
+            // still possible and means no period at all, which is not a rule.
+            let period = match (days, years) {
+                (Some(days), None) => serde_json::json!({"unit": "days", "value": days}),
+                (None, Some(years)) => serde_json::json!({"unit": "years", "value": years}),
+                _ => {
+                    anyhow::bail!("a default retention needs exactly one of --days or --years");
+                }
+            };
+            client()?
+                .put(api_url(
+                    &endpoint,
+                    &format!("/api/v1/buckets/{name}/object-lock"),
+                ))
+                .json(&serde_json::json!({
+                    "object_lock": {
+                        "default_retention": {"mode": mode.to_lowercase(), "period": period}
+                    }
+                }))
+        }
+        BucketObjectLockCommand::Status {
+            name,
+            key,
+            version_id,
+            endpoint,
+        } => {
+            let url = api_url(
+                &endpoint,
+                &format!("/api/v1/buckets/{name}/object-lock/{key}"),
+            );
+            let request = client()?.get(url);
+            match version_id {
+                Some(version_id) => request.query(&[("version_id", version_id)]),
+                None => request,
+            }
+        }
+    };
+    let value = send_admin(request)
+        .await?
+        .json::<serde_json::Value>()
+        .await
+        .context("decode object lock response")?;
+    print_value(&value, json)
 }
 
 async fn bucket_versioning(command: BucketVersioningCommand, json: bool) -> Result<()> {

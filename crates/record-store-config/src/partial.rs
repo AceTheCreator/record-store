@@ -15,6 +15,7 @@ pub(crate) struct PartialConfig {
     limits: Option<PartialLimitsConfig>,
     webhooks: Option<PartialWebhookConfig>,
     lifecycle: Option<PartialLifecycleConfig>,
+    object_lock: Option<PartialObjectLockConfig>,
     sharing: Option<PartialSharingConfig>,
     cluster: Option<PartialClusterConfig>,
     observability: Option<PartialObservabilityConfig>,
@@ -36,6 +37,9 @@ impl PartialConfig {
         }
         if let Some(value) = self.webhooks {
             value.apply(&mut target.webhooks);
+        }
+        if let Some(value) = self.object_lock {
+            value.apply(&mut target.object_lock);
         }
         if let Some(value) = self.lifecycle {
             value.apply(&mut target.lifecycle);
@@ -318,6 +322,24 @@ impl PartialLifecycleConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct PartialObjectLockConfig {
+    clock_watermark_interval_seconds: Option<u64>,
+    clock_backwards_tolerance_seconds: Option<u32>,
+}
+
+impl PartialObjectLockConfig {
+    pub(crate) fn apply(self, target: &mut ObjectLockConfig) {
+        if let Some(value) = self.clock_watermark_interval_seconds {
+            target.clock_watermark_interval_seconds = value;
+        }
+        if let Some(value) = self.clock_backwards_tolerance_seconds {
+            target.clock_backwards_tolerance_seconds = value;
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PartialSharingConfig {
     shares_enabled: Option<bool>,
     embeds_enabled: Option<bool>,
@@ -446,6 +468,10 @@ request_timeout_seconds = 8
 maximum_attempts = 6
 poll_interval_seconds = 13
 
+[object_lock]
+clock_watermark_interval_seconds = 90
+clock_backwards_tolerance_seconds = 11
+
 [lifecycle]
 interval_seconds = 450
 batch_size = 175
@@ -537,6 +563,8 @@ json = true
         assert_eq!(config.webhooks.maximum_attempts, 6);
         assert_eq!(config.webhooks.poll_interval_seconds, 13);
 
+        assert_eq!(config.object_lock.clock_watermark_interval_seconds, 90);
+        assert_eq!(config.object_lock.clock_backwards_tolerance_seconds, 11);
         assert_eq!(config.lifecycle.interval_seconds, 450);
         assert_eq!(config.lifecycle.batch_size, 175);
 

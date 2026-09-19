@@ -259,6 +259,9 @@ impl ManagementPrincipal {
                         || path == "/api/v1/storage/usage"
                         || path == "/api/v1/storage/inspect"
                         || path == "/api/v1/buckets"
+                        // Which records are retained, and until when, is
+                        // exactly the question an auditor is there to answer.
+                        || path.contains("/object-lock")
                         || path == "/api/v1/webhooks"
                         || path == "/api/v1/webhook-deliveries"
                         || path.starts_with("/api/v1/cluster")

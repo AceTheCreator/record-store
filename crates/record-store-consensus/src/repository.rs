@@ -17,14 +17,15 @@ use record_store_cluster::{
 use record_store_core::{
     Bucket, BucketId, BucketName, BucketQuota, ClusterOperationId, CorsConfiguration, JoinTokenId,
     LifecycleRule, LifecycleRuleId, MultipartUpload, NodeCredentialId, NodeId, ObjectId, ObjectKey,
-    ObjectMetadata, ObjectVersionRecord, PartNumber, ReplicaTaskId, StorageUsage, UploadId,
-    UploadedPart, VersionId, VersioningState,
+    ObjectLockConfiguration, ObjectLockState, ObjectMetadata, ObjectVersionRecord, PartNumber,
+    ReplicaTaskId, StorageUsage, UploadId, UploadedPart, VersionId, VersioningState,
 };
 use record_store_metadata::{
     DeleteObjectResult, DeleteVersionResult, ListMultipartUploadsRequest,
-    ListObjectVersionsRequest, ListObjectsRequest, MetadataCommand, MetadataError, MetadataOutcome,
-    MetadataRepository, MultipartCleanupResult, MultipartUploadPage, NewDeleteMarker,
-    ObjectCommitResult, ObjectMetadataPage, ObjectVersionPage, PayloadReferencePage,
+    ListObjectVersionsRequest, ListObjectsRequest, LockRelease, MetadataCommand, MetadataError,
+    MetadataOutcome, MetadataRepository, MultipartCleanupResult, MultipartUploadPage,
+    NewDeleteMarker, ObjectCommitResult, ObjectMetadataPage, ObjectVersionPage,
+    PayloadReferencePage,
 };
 
 use crate::{
@@ -139,6 +140,19 @@ impl MetadataRepository for ReplicatedMetadataRepository {
         .into_bucket()
     }
 
+    async fn set_bucket_object_lock(
+        &self,
+        id: BucketId,
+        configuration: ObjectLockConfiguration,
+    ) -> Result<Bucket, MetadataError> {
+        self.propose(MetadataCommand::SetBucketObjectLock {
+            bucket_id: id,
+            configuration,
+        })
+        .await?
+        .into_bucket()
+    }
+
     async fn delete_bucket(&self, name: &BucketName) -> Result<Bucket, MetadataError> {
         self.propose(MetadataCommand::DeleteBucket { name: name.clone() })
             .await?
@@ -148,9 +162,11 @@ impl MetadataRepository for ReplicatedMetadataRepository {
     async fn put_object(
         &self,
         metadata: &ObjectMetadata,
+        object_lock: Option<ObjectLockState>,
     ) -> Result<ObjectCommitResult, MetadataError> {
         self.propose(MetadataCommand::PutObject {
             metadata: Box::new(metadata.clone()),
+            object_lock,
         })
         .await?
         .into_object_commit()
@@ -204,14 +220,46 @@ impl MetadataRepository for ReplicatedMetadataRepository {
         bucket: BucketId,
         key: &ObjectKey,
         version: VersionId,
+        release: LockRelease,
     ) -> Result<Option<DeleteVersionResult>, MetadataError> {
         self.propose(MetadataCommand::DeleteObjectVersion {
             bucket_id: bucket,
             key: key.clone(),
             version_id: version,
+            release,
         })
         .await?
         .into_delete_version()
+    }
+
+    async fn get_object_lock(&self, version: VersionId) -> Result<ObjectLockState, MetadataError> {
+        self.barrier().await?;
+        self.local.get_object_lock(version).await
+    }
+
+    async fn put_object_lock(
+        &self,
+        bucket: BucketId,
+        key: &ObjectKey,
+        version: VersionId,
+        requested: ObjectLockState,
+        release: LockRelease,
+    ) -> Result<ObjectLockState, MetadataError> {
+        self.propose(MetadataCommand::PutObjectLock {
+            bucket_id: bucket,
+            key: key.clone(),
+            version_id: version,
+            requested,
+            release,
+        })
+        .await?
+        .into_object_lock()
+    }
+
+    async fn observe_clock(&self, release: LockRelease) -> Result<(), MetadataError> {
+        self.propose(MetadataCommand::ObserveClock { release })
+            .await
+            .map(|_| ())
     }
 
     async fn list_objects(
@@ -927,6 +975,7 @@ mod tests {
             quota: BucketQuota::default(),
             storage_class: None,
             durability_policy: None,
+            object_lock: None,
             cors: None,
         }
     }
@@ -999,7 +1048,7 @@ mod tests {
             created_at: Utc::now(),
             modified_at: Utc::now(),
         };
-        repository.put_object(&metadata).await.expect("put");
+        repository.put_object(&metadata, None).await.expect("put");
 
         assert_eq!(
             repository
@@ -1210,8 +1259,8 @@ mod tests {
         let key = ObjectKey::new("note.txt").expect("key");
         let first = metadata_for(record.id, "note.txt", 3);
         let second = metadata_for(record.id, "note.txt", 5);
-        repository.put_object(&first).await.expect("put");
-        repository.put_object(&second).await.expect("put");
+        repository.put_object(&first, None).await.expect("put");
+        repository.put_object(&second, None).await.expect("put");
 
         assert!(
             repository
@@ -1264,7 +1313,12 @@ mod tests {
         assert_eq!(versions.versions.len(), 3, "history survives replication");
 
         repository
-            .delete_object_version(record.id, &key, first.version_id)
+            .delete_object_version(
+                record.id,
+                &key,
+                first.version_id,
+                LockRelease::new(chrono::Utc::now(), 5),
+            )
             .await
             .expect("delete version");
     }
@@ -1284,6 +1338,7 @@ mod tests {
             key: ObjectKey::new("big.bin").expect("key"),
             content_type: None,
             custom_metadata: Default::default(),
+            object_lock: None,
             initiated_at: Utc::now(),
             state: record_store_core::MultipartUploadState::Active,
         };
@@ -1386,7 +1441,7 @@ mod tests {
             .expect("delete rule");
 
         let stored = metadata_for(record.id, "logs/a", 16);
-        repository.put_object(&stored).await.expect("put");
+        repository.put_object(&stored, None).await.expect("put");
         assert!(
             repository
                 .payload_referenced(stored.id)
@@ -1436,7 +1491,7 @@ mod tests {
         let record = bucket("occupied");
         repository.create_bucket(&record).await.expect("create");
         let stored = metadata_for(record.id, "a.txt", 1);
-        repository.put_object(&stored).await.expect("put");
+        repository.put_object(&stored, None).await.expect("put");
 
         assert!(matches!(
             repository.delete_bucket(&record.name).await,

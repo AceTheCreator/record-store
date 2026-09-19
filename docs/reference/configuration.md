@@ -120,6 +120,19 @@ deliberately internal receiver. See
 `batch_size` bounds one pass per rule, not total work. See
 [Lifecycle Rules](../administration/lifecycle-rules.md).
 
+## `[object_lock]`
+
+| Key | Type | Default | Environment |
+| --- | --- | --- | --- |
+| `clock_watermark_interval_seconds` | integer 1–3600 | `60` | `RECORD_STORE_OBJECT_LOCK_CLOCK_WATERMARK_INTERVAL_SECONDS` |
+| `clock_backwards_tolerance_seconds` | integer 0–300 | `5` | `RECORD_STORE_OBJECT_LOCK_CLOCK_BACKWARDS_TOLERANCE_SECONDS` |
+
+A retention date is only as trustworthy as the clock judging it, so Record Store keeps a
+monotonic high-water mark of observed time and refuses to release a retained version when
+the clock falls behind it. The interval is how often that mark is refreshed while the
+node is idle; the tolerance absorbs ordinary NTP correction. See
+[Object Lock and Trust](../security/object-lock.md#the-clock).
+
 ## `[sharing]`
 
 | Key | Type | Default | Environment |
@@ -190,6 +203,10 @@ maximum_attempts = 6
 [lifecycle]
 interval_seconds = 3600
 batch_size = 100
+
+[object_lock]
+clock_watermark_interval_seconds = 60
+clock_backwards_tolerance_seconds = 5
 
 [sharing]
 require_expiration = true

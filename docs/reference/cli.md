@@ -107,10 +107,24 @@ record-store bucket delete <name> --endpoint <endpoint>
 record-store bucket versioning get <name> --endpoint <endpoint>
 record-store bucket versioning enable <name> --endpoint <endpoint>
 record-store bucket versioning suspend <name> --endpoint <endpoint>
+
+record-store bucket object-lock show <name> --endpoint <endpoint>
+record-store bucket object-lock set-default <name> --mode GOVERNANCE --days 365 --endpoint <endpoint>
+record-store bucket object-lock set-default <name> --mode COMPLIANCE --years 7 --endpoint <endpoint>
+record-store bucket object-lock status <name> <key> [--version-id <id>] --endpoint <endpoint>
 ```
 
 `delete` requires the bucket to be empty. There is no `versioning disable` — see
 [Versioning](../concepts/versioning.md).
+
+Object Lock is enabled when a bucket is created, over S3, and never afterwards. These
+commands read it and set the bucket default; `set-default` takes exactly one of `--days`
+or `--years`.
+
+`object-lock status` is read-only, and there is deliberately no command to place or
+release a retention. That is an S3 action governed by S3 policy, and a management-plane
+equivalent would let a caller refused over S3 succeed simply by changing port. See
+[Object Lock](../administration/object-lock.md).
 
 ## `service-account`
 

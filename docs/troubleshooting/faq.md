@@ -5,7 +5,7 @@
 **Is Record Store a drop-in replacement for S3?**
 
 For the [supported operations](../reference/s3-compatibility.md), yes — point your SDK
-at the endpoint and use path-style addressing. Access control lists, Object Lock,
+at the endpoint and use path-style addressing. Access control lists,
 `UploadPartCopy`, and server-side-encryption request headers are not supported.
 
 **What happens if the machine dies?**

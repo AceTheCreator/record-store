@@ -20,7 +20,7 @@ use record_store_auth::{CredentialManager, SigningSecret};
 use record_store_core::OrganizationId;
 use record_store_metadata::MetadataRepository;
 use record_store_metadata::RedbMetadataRepository;
-use record_store_service::{ServiceLimits, Services};
+use record_store_service::{ObjectLockLimits, ServiceLimits, Services};
 use record_store_storage::LocalFilesystemStore;
 use record_store_storage::ObjectStore;
 use sha2::{Digest, Sha256};
@@ -59,6 +59,7 @@ pub(crate) async fn test_router() -> (TempDir, Router, Arc<CredentialManager>) {
             maximum_concurrent_operations: 16,
             maximum_custom_metadata_entries: 8,
             maximum_custom_metadata_bytes: 1_024,
+            object_lock: ObjectLockLimits::default(),
         },
     );
     let credentials = Arc::new(
@@ -264,4 +265,54 @@ pub(crate) async fn put(application: &Router, bucket: &str, key: &str, body: &[u
         axum::http::StatusCode::OK,
         "put {bucket}/{key}"
     );
+}
+
+/// Creates a bucket with Object Lock enabled for its lifetime.
+pub(crate) async fn make_locked_bucket(application: &Router, bucket: &str) {
+    let response = send(
+        application,
+        Method::PUT,
+        &format!("/{bucket}"),
+        b"",
+        &[("x-amz-bucket-object-lock-enabled", "true")],
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::OK,
+        "create locked bucket {bucket}"
+    );
+}
+
+/// Stores an object and returns the version identifier it was published under.
+pub(crate) async fn put_returning_version(
+    application: &Router,
+    bucket: &str,
+    key: &str,
+    body: &[u8],
+    headers: &[(&str, &str)],
+) -> String {
+    let response = send(
+        application,
+        Method::PUT,
+        &format!("/{bucket}/{key}"),
+        body,
+        headers,
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::OK,
+        "put {bucket}/{key}"
+    );
+    response_header(&response, "x-amz-version-id").expect("a versioned put reports its version")
+}
+
+/// Reads one response header as a string.
+pub(crate) fn response_header(response: &Response, name: &str) -> Option<String> {
+    response
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
 }

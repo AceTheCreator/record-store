@@ -81,7 +81,7 @@ pub const S3_CAPABILITIES: &[S3Capability] = &[
     },
     S3Capability {
         name: "ObjectLock",
-        status: CapabilityStatus::Unsupported,
+        status: CapabilityStatus::Implemented,
     },
     S3Capability {
         name: "AwsChunkedEncoding",

@@ -32,11 +32,20 @@ pub(crate) const BUCKET_USAGE: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("bucket_usage.v1");
 pub(crate) const LIFECYCLE_RULES: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("lifecycle_rules.v1");
+pub(crate) const OBJECT_LOCKS: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("object_locks.v1");
 pub(crate) const COUNTERS: TableDefinition<&str, u64> = TableDefinition::new("counters.v1");
+/// Monotonic high-water mark of observed wall-clock time, in microseconds.
+///
+/// Retention is only as trustworthy as the clock, so the catalog remembers the
+/// furthest point in time it has ever seen rather than believing whatever the
+/// system offers on this boot.
+pub(crate) const CLOCK: TableDefinition<&str, i64> = TableDefinition::new("clock.v1");
+pub(crate) const CLOCK_WATERMARK: &str = "observed_high_water_mark";
 pub(crate) const SCHEMA: TableDefinition<&str, u64> = TableDefinition::new("schema.v1");
 
 /// Current durable catalog format used by offline backup compatibility checks.
-pub const METADATA_SCHEMA_VERSION: u64 = 4;
+pub const METADATA_SCHEMA_VERSION: u64 = 5;
 pub(crate) const CURRENT_SCHEMA_VERSION: u64 = METADATA_SCHEMA_VERSION;
 pub(crate) const OBJECT_COUNT: &str = "objects";
 pub(crate) const BUCKET_COUNT: &str = "buckets";
@@ -63,6 +72,7 @@ pub(crate) fn initialize_schema(database: &Database) -> Result<(), MetadataError
         PARTS,
         BUCKET_USAGE,
         LIFECYCLE_RULES,
+        OBJECT_LOCKS,
     ] {
         write
             .open_table(table)
@@ -80,6 +90,9 @@ pub(crate) fn initialize_schema(database: &Database) -> Result<(), MetadataError
     write
         .open_table(SCHEMA)
         .map_err(|e| backend("initialize schema", e))?;
+    write
+        .open_table(CLOCK)
+        .map_err(|e| backend("initialize clock", e))?;
     let version = {
         let table = write
             .open_table(SCHEMA)
@@ -103,6 +116,9 @@ pub(crate) fn initialize_schema(database: &Database) -> Result<(), MetadataError
     if version < 4 {
         migrate_v4(&write)?;
     }
+    if version < 5 {
+        migrate_v5(&write)?;
+    }
     if version < CURRENT_SCHEMA_VERSION {
         let mut table = write
             .open_table(SCHEMA)
@@ -114,6 +130,22 @@ pub(crate) fn initialize_schema(database: &Database) -> Result<(), MetadataError
     write
         .commit()
         .map_err(|e| backend("commit initialization", e))
+}
+
+/// Adds the Object Lock and clock tables.
+///
+/// Nothing is rewritten. Every existing bucket decodes with no Object Lock
+/// configuration and every existing version with no lock record, which is
+/// exactly what an unlocked deployment means, so a v4 catalog keeps serving
+/// every object unchanged.
+pub(crate) fn migrate_v5(write: &redb::WriteTransaction) -> Result<(), MetadataError> {
+    write
+        .open_table(OBJECT_LOCKS)
+        .map_err(|e| backend("migrate object locks", e))?;
+    write
+        .open_table(CLOCK)
+        .map_err(|e| backend("migrate clock", e))?;
+    Ok(())
 }
 
 pub(crate) fn migrate_v4(write: &redb::WriteTransaction) -> Result<(), MetadataError> {

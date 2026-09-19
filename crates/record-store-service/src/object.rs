@@ -3,7 +3,9 @@
 use std::sync::{Arc, atomic::Ordering};
 
 use futures_util::StreamExt;
-use record_store_core::{BucketName, ObjectKey, ObjectMetadata, ObjectVersionRecord, VersionId};
+use record_store_core::{
+    BucketName, ObjectKey, ObjectLockState, ObjectMetadata, ObjectVersionRecord, VersionId,
+};
 use record_store_events::{EventRepository, StorageEvent, StorageEventType};
 use record_store_metadata::{
     ListObjectVersionsRequest as MetadataVersionListRequest, MetadataRepository,
@@ -16,6 +18,7 @@ use tokio::sync::Semaphore;
 
 use crate::error::map_storage;
 use crate::events::publish_event;
+use crate::lock::LockPolicy;
 use crate::services::BucketCoordinator;
 use crate::*;
 
@@ -29,6 +32,7 @@ pub struct ObjectService {
     pub(crate) maximum_custom_metadata_entries: usize,
     pub(crate) maximum_custom_metadata_bytes: usize,
     pub(crate) events: Option<Arc<dyn EventRepository>>,
+    pub(crate) policy: Arc<LockPolicy>,
 }
 
 impl ObjectService {
@@ -40,6 +44,7 @@ impl ObjectService {
         let bucket = self.resolve_bucket(&request.bucket).await?;
         let lock = self.coordinator.lock(bucket.id)?;
         let _bucket_guard = lock.read().await;
+        let object_lock = ObjectLockService::initial_state(&bucket, request.object_lock)?;
         let event_type = if self
             .metadata
             .get_object(bucket.id, &request.key)
@@ -60,6 +65,7 @@ impl ObjectService {
                 expected_checksum: request.expected_checksum,
                 object_id: None,
                 protocol_etag: None,
+                object_lock,
                 body: request.body,
             })
             .await
@@ -343,25 +349,51 @@ impl ObjectService {
     }
 
     /// Permanently removes an explicitly selected immutable version.
+    ///
+    /// Object Lock is enforced inside the metadata transaction that removes the
+    /// version, so a retention placed concurrently cannot be raced. This layer
+    /// supplies the clock and bypass inputs it is judged against, and records
+    /// an exercised bypass in the durable audit trail.
     pub async fn delete_version(
         &self,
         bucket_name: &BucketName,
         key: ObjectKey,
         version_id: VersionId,
+        context: &LockContext,
     ) -> Result<(), ServiceError> {
         self.metrics.requests.fetch_add(1, Ordering::Relaxed);
         let _permit = self.acquire().await?;
         let bucket = self.resolve_bucket(bucket_name).await?;
         let lock = self.coordinator.lock(bucket.id)?;
         let _guard = lock.read().await;
-        self.storage
+        let result = self
+            .storage
             .delete_version(DeleteObjectVersionRequest {
                 bucket_id: bucket.id,
                 key: key.clone(),
                 version_id,
+                release: self.policy.release(context),
             })
             .await
-            .map_err(map_storage)?;
+            .map_err(map_storage);
+        if context.bypass_governance {
+            let outcome = if result.is_ok() {
+                record_store_audit::AuditResult::Success
+            } else {
+                record_store_audit::AuditResult::Denied
+            };
+            self.policy
+                .record_bypass(
+                    context,
+                    "object-lock.bypass-delete-version",
+                    bucket_name,
+                    &key,
+                    version_id,
+                    outcome,
+                )
+                .await;
+        }
+        result?;
         publish_event(
             &self.events,
             StorageEvent::new(StorageEventType::ObjectDeleted, bucket.name.as_str()).object(
@@ -379,6 +411,7 @@ impl ObjectService {
         &self,
         bucket_name: &BucketName,
         key: ObjectKey,
+        context: &LockContext,
     ) -> Result<(), ServiceError> {
         let bucket = self.resolve_bucket(bucket_name).await?;
         let record = self
@@ -386,8 +419,19 @@ impl ObjectService {
             .get_null_version(bucket.id, &key)
             .await?
             .ok_or(ServiceError::ObjectNotFound)?;
-        self.delete_version(bucket_name, key, record.version_id())
+        self.delete_version(bucket_name, key, record.version_id(), context)
             .await
+    }
+
+    /// Returns the Object Lock state of one version, for response headers.
+    pub async fn version_lock(
+        &self,
+        version_id: VersionId,
+    ) -> Result<ObjectLockState, ServiceError> {
+        self.metadata
+            .get_object_lock(version_id)
+            .await
+            .map_err(crate::error::map_metadata)
     }
 
     /// Lists immutable versions and delete markers without unbounded loading.

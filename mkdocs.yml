@@ -124,6 +124,7 @@ nav:
       - Temporary Credentials: administration/temporary-credentials.md
       - Quotas: administration/quotas.md
       - Lifecycle Rules: administration/lifecycle-rules.md
+      - Object Lock: administration/object-lock.md
       - Audit Log: administration/audit-log.md
       - Events and Webhooks: administration/events-and-webhooks.md
       - Metrics: administration/metrics.md
@@ -143,6 +144,7 @@ nav:
       - Authorization: security/authorization.md
       - Encryption: security/encryption.md
       - Sharing Security: security/sharing-security.md
+      - Object Lock and Trust: security/object-lock.md
       - Security Checklist: security/checklist.md
   - Operations:
       - operations/index.md

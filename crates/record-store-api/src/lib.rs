@@ -18,8 +18,8 @@ use crate::handlers::accounts::{
 };
 use crate::handlers::audit::list_audit_events;
 use crate::handlers::buckets::{
-    create_bucket, delete_bucket, get_bucket_versioning, list_buckets, set_bucket_quota,
-    set_bucket_versioning,
+    create_bucket, delete_bucket, get_bucket_object_lock, get_bucket_versioning, get_object_lock,
+    list_buckets, set_bucket_object_lock, set_bucket_quota, set_bucket_versioning,
 };
 use crate::handlers::cluster::{
     activate_cluster_device, cluster_health, cluster_initialize, cluster_status,
@@ -490,6 +490,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/buckets/{bucket}/versioning",
             get(get_bucket_versioning).put(set_bucket_versioning),
+        )
+        .route(
+            "/api/v1/buckets/{bucket}/object-lock",
+            get(get_bucket_object_lock).put(set_bucket_object_lock),
+        )
+        .route(
+            "/api/v1/buckets/{bucket}/object-lock/{*key}",
+            get(get_object_lock),
         )
         .route(
             "/api/v1/buckets/{bucket}/quota",

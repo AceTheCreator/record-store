@@ -14,6 +14,7 @@ mod ids;
 mod lifecycle;
 mod names;
 mod object;
+mod object_lock;
 mod preview;
 mod quota;
 mod range;
@@ -30,11 +31,15 @@ pub use ids::{
     PolicyId, ReplicaTaskId, ServiceAccountId, ShardId, ShareLinkId, StripeId, UploadId, VersionId,
     WebhookId,
 };
-pub use lifecycle::{LifecycleRule, ObjectRetention, RetentionMode, StorageUsage};
+pub use lifecycle::{LifecycleRule, StorageUsage};
 pub use names::{BucketName, ObjectKey};
 pub use object::{
     Bucket, CompletedPart, DeleteMarker, MultipartUpload, MultipartUploadState, ObjectMetadata,
     ObjectVersion, ObjectVersionRecord, PayloadFormat, UploadedPart,
+};
+pub use object_lock::{
+    DefaultRetention, LockBlock, LockChangeRefused, ObjectLockConfiguration, ObjectLockState,
+    Retention, RetentionMode, RetentionPeriod,
 };
 pub use preview::{CONTENT_SIGNATURE_PROBE_BYTES, PreviewKind, content_signature_matches};
 pub use quota::{BucketQuota, ByteQuota, ExpirationDays, ObjectCountQuota, VersioningState};

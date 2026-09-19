@@ -25,12 +25,14 @@ impl ObjectService {
         self.validate_custom_metadata(&request.custom_metadata)?;
         let _permit = self.acquire().await?;
         let bucket = self.resolve_bucket(&request.bucket).await?;
+        let object_lock = ObjectLockService::initial_state(&bucket, request.object_lock)?;
         let upload = MultipartUpload {
             id: UploadId::new(),
             bucket_id: bucket.id,
             key: request.key,
             content_type: request.content_type,
             custom_metadata: request.custom_metadata,
+            object_lock,
             initiated_at: Utc::now(),
             state: MultipartUploadState::Active,
         };
@@ -257,6 +259,7 @@ mod tests {
                 key: key(),
                 content_type: None,
                 custom_metadata: Default::default(),
+                object_lock: None,
             })
             .await
             .expect("create multipart");

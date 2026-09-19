@@ -38,6 +38,15 @@ poll_interval_seconds = 2
 interval_seconds = 3600
 batch_size = 100
 
+[object_lock]
+# A retention date is only as trustworthy as the clock judging it, so Record
+# Store keeps a monotonic high-water mark of the furthest point in time it has
+# observed and refuses to release a retained version while the clock is behind
+# it. The interval refreshes that mark while the node is idle; the tolerance
+# absorbs ordinary NTP correction rather than a jump.
+clock_watermark_interval_seconds = 60
+clock_backwards_tolerance_seconds = 5
+
 [sharing]
 # Share links are for people; embed links are for websites and applications.
 # Both are unguessable, individually revocable capabilities that grant read
