@@ -9,6 +9,10 @@ use redb::{Database, ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod canonical;
+pub mod chain;
+pub mod merkle;
+
 const EVENTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("audit_events.v1");
 
 /// Stable audit result category.
@@ -87,6 +91,8 @@ pub enum AuditError {
     Task(#[from] tokio::task::JoinError),
     #[error("audit query limit must be between 1 and 1000")]
     InvalidLimit,
+    #[error("a digest must be 32 bytes of hex")]
+    InvalidDigest,
 }
 
 #[derive(Clone)]

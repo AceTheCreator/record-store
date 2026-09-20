@@ -11,6 +11,41 @@ publishes, so keep it factual and written for the people upgrading.
 
 ### Added
 
+- **Portable proof bundles.** `record-store verify object <bucket> <key>
+  [--version-id ID] --proof <out.json>` emits a signed JSON document describing one
+  immutable object version: its identity, the SHA-256 recorded at write time, the
+  deployment's public verification key, and a bundle format version. It carries no
+  capability tokens, no credentials, and not the payload.
+
+  `record-store verify proof <out.json> --object ./file` checks one **offline** —
+  no server, no network, no credential. It streams the file past SHA-256 rather
+  than loading it, verifies the Ed25519 signature, and prints every check it
+  performed alongside every one it could not, so a passing result never implies
+  more than it established. It exits non-zero on failure.
+
+  The signing key is derived from `RECORD_STORE_CREDENTIAL_MASTER_KEY` under the
+  domain separation string `record-store/proof-signing/v1`, so it is distinct from
+  the credential, capability, webhook, and object-encryption keys and survives a
+  restore from backup. Without a master key the deployment reports bundles as
+  unavailable rather than emitting an unsigned one, which would be mistaken for a
+  signed one.
+
+  The format is specified in [`docs/reference/proof-bundle.md`](docs/reference/proof-bundle.md),
+  including the canonical byte encoding signatures cover, the Merkle rules, the key
+  derivation, and a worked example, so an independent implementation is possible.
+
+  **The audit history, checkpoint, and anchor sections are defined in the format but
+  are reported as `unavailable` in this release**, because the tamper-evident audit
+  chain they draw on is not built yet. They are an explicit `status` rather than an
+  omitted field: a missing section reads as "nothing happened", where this reads as
+  "this was not checked". Bundles issued now stay parseable by later verifiers.
+
+  A bundle is not a certificate of authenticity. The signing key derives from the
+  deployment's own master key, so it is evidence against alteration in transit and
+  against a third-party forgery, not against the deployment's own operator. Without
+  the deployment's public key obtained out of band, the verifier reports the
+  deployment's identity as **not established** rather than passing that check.
+
 - **Object Lock, with AWS semantics.** `GOVERNANCE` and `COMPLIANCE` retention, legal
   holds, per-bucket default retention, and a governance bypass that needs its own policy
   permission. The S3 surface adds `CreateBucket` with

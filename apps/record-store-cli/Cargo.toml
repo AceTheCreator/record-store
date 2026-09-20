@@ -13,6 +13,8 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 record-store-config = { path = "../../crates/record-store-config" }
+hex.workspace = true
+record-store-proof = { path = "../../crates/record-store-proof" }
 record-store-core = { path = "../../crates/record-store-core" }
 record-store-observability = { path = "../../crates/record-store-observability" }
 record-store-server = { path = "../record-store-server" }
