@@ -64,6 +64,9 @@ const CLASSIFIED: &[(&str, Audience)] = &[
     ("/api/v1/buckets/{}/object-lock/{}", Audience::Cli),
     // Proof bundles are fetched by the CLI and verified offline afterwards.
     ("/api/v1/buckets/{}/proof/{}", Audience::Cli),
+    ("/api/v1/audit/export", Audience::Cli),
+    ("/api/v1/audit/export/manifest", Audience::Cli),
+    ("/api/v1/reports/retention", Audience::Cli),
     ("/api/v1/cluster", Audience::ConsoleAndCli),
     // The console's Drives screen lists devices and drives their lifecycle; the
     // CLI covers the same ground for automation.

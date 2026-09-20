@@ -7,7 +7,7 @@ use record_store_core::{
 };
 
 use crate::test_support::{body, services_with_audit};
-use crate::{LockContext, ServiceError, ServicePutRequest};
+use crate::{LockContext, RetentionStatus, ServiceError, ServicePutRequest};
 
 async fn locked_bucket(services: &crate::Services, name: &str) -> BucketName {
     let bucket = BucketName::new(name).expect("bucket name");
@@ -223,4 +223,146 @@ async fn a_system_context_never_carries_a_bypass() {
         LockContext::system("lifecycle").principal,
         "system:lifecycle"
     );
+}
+
+/// A lock record outlives the retention it describes, so a report that treated
+/// the record's presence as "still held" would overstate what is protected —
+/// which is the one direction that matters for an auditor.
+#[tokio::test]
+async fn the_retention_report_separates_held_versions_from_elapsed_ones() {
+    let (_directory, services, _audit) = services_with_audit().await;
+    let bucket = locked_bucket(&services, "records").await;
+
+    let held = services
+        .objects
+        .put(ServicePutRequest {
+            bucket: bucket.clone(),
+            key: ObjectKey::new("held.txt").expect("key"),
+            content_type: None,
+            custom_metadata: std::collections::BTreeMap::new(),
+            expected_checksum: None,
+            object_lock: Some(ObjectLockState {
+                retention: Some(Retention {
+                    mode: RetentionMode::Compliance,
+                    retain_until: Utc::now() + Duration::days(30),
+                }),
+                legal_hold: false,
+            }),
+            body: body(b"held"),
+        })
+        .await
+        .expect("put held");
+
+    let elapsed = services
+        .objects
+        .put(ServicePutRequest {
+            bucket: bucket.clone(),
+            key: ObjectKey::new("elapsed.txt").expect("key"),
+            content_type: None,
+            custom_metadata: std::collections::BTreeMap::new(),
+            expected_checksum: None,
+            object_lock: Some(ObjectLockState {
+                retention: Some(Retention {
+                    mode: RetentionMode::Governance,
+                    retain_until: Utc::now() - Duration::days(1),
+                }),
+                legal_hold: false,
+            }),
+            body: body(b"elapsed"),
+        })
+        .await
+        .expect("put elapsed");
+
+    let on_hold = services
+        .objects
+        .put(ServicePutRequest {
+            bucket: bucket.clone(),
+            key: ObjectKey::new("legal.txt").expect("key"),
+            content_type: None,
+            custom_metadata: std::collections::BTreeMap::new(),
+            expected_checksum: None,
+            object_lock: Some(ObjectLockState {
+                retention: None,
+                legal_hold: true,
+            }),
+            body: body(b"legal"),
+        })
+        .await
+        .expect("put legal hold");
+
+    let report = services.locks.retention_report().await.expect("report");
+
+    assert_eq!(report.buckets.len(), 1);
+    assert_eq!(report.buckets[0].bucket, "records");
+    assert_eq!(report.versions.len(), 3);
+    assert_eq!(
+        report.held_count, 2,
+        "the compliance retention and the hold"
+    );
+    assert!(!report.truncated);
+
+    let find = |version_id| {
+        report
+            .versions
+            .iter()
+            .find(|entry| entry.version_id == version_id)
+            .unwrap_or_else(|| panic!("version {version_id} missing from the report"))
+    };
+
+    let held_entry = find(held.metadata.version_id);
+    assert_eq!(held_entry.status, RetentionStatus::Held);
+    assert_eq!(held_entry.retention_mode.as_deref(), Some("COMPLIANCE"));
+    assert!(held_entry.retain_until.is_some());
+    assert_eq!(held_entry.key, "held.txt");
+
+    let elapsed_entry = find(elapsed.metadata.version_id);
+    assert_eq!(
+        elapsed_entry.status,
+        RetentionStatus::Elapsed,
+        "a retention past its date no longer holds the version"
+    );
+    // It is still reported, because the record is still there and an auditor
+    // asking what is retained wants to see it rather than have it vanish.
+    assert_eq!(elapsed_entry.retention_mode.as_deref(), Some("GOVERNANCE"));
+
+    let hold_entry = find(on_hold.metadata.version_id);
+    assert_eq!(hold_entry.status, RetentionStatus::Held);
+    assert!(hold_entry.legal_hold);
+    assert!(
+        hold_entry.retention_mode.is_none(),
+        "a legal hold is not a retention"
+    );
+}
+
+/// A deployment with no Object Lock anywhere must report an empty report rather
+/// than failing, so an operator can tell "nothing retained" from "broken".
+#[tokio::test]
+async fn a_deployment_without_object_lock_reports_an_empty_retention_report() {
+    let (_directory, services, _audit) = services_with_audit().await;
+    services
+        .buckets
+        .create(BucketName::new("plain").expect("bucket name"))
+        .await
+        .expect("create bucket");
+
+    let report = services.locks.retention_report().await.expect("report");
+
+    assert!(report.buckets.is_empty());
+    assert!(report.versions.is_empty());
+    assert_eq!(report.held_count, 0);
+    assert!(!report.truncated);
+}
+
+/// A bucket with Object Lock enabled but nothing locked yet still appears, so
+/// an auditor sees the policy exists before anything exercises it.
+#[tokio::test]
+async fn a_locked_bucket_with_no_locked_versions_still_appears() {
+    let (_directory, services, _audit) = services_with_audit().await;
+    locked_bucket(&services, "records").await;
+
+    let report = services.locks.retention_report().await.expect("report");
+
+    assert_eq!(report.buckets.len(), 1);
+    assert!(report.versions.is_empty());
+    assert_eq!(report.held_count, 0);
 }

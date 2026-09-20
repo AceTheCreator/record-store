@@ -183,9 +183,15 @@ jobs:
     name: Binary archives
     needs: [validate, server-image]
     runs-on: ubuntu-latest
+    # The archives are downloaded and executed directly, with no registry in
+    # between to carry a referrer, so they need provenance at least as much as
+    # the images do. id-token mints the Sigstore certificate; attestations
+    # records the result against the repository.
     permissions:
       contents: read
       packages: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -222,6 +228,14 @@ jobs:
               --directory "$staging" record-store record-store-server
           done
           ls -l dist
+
+      # Binds each archive to this workflow, this repository and this commit:
+      #   gh attestation verify record-store-VERSION-linux-amd64.tar.gz \
+      #     --repo OWNER/REPO
+      - name: Attest the archives
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: dist/*.tar.gz
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -361,9 +375,43 @@ jobs:
           docker logs record-store || true
           docker logs record-store-console || true
 
+  provenance:
+    name: Verify attestations
+    needs: [validate, server-image, console-image, binaries]
+    runs-on: ubuntu-latest
+    # Read-only. This job proves the claim the release makes; it must not be
+    # able to create the evidence it is checking.
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          pattern: binaries
+          merge-multiple: true
+
+      # Queries the same public attestation service a user would, so a pass here
+      # means `gh attestation verify` will also pass for whoever downloads the
+      # release. Failing stops the release from being created at all.
+      - name: Verify provenance and SBOMs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          .github/scripts/verify-attestations.sh \
+            "${{ github.repository }}" \
+            dist \
+            "${{ needs.validate.outputs.server-image }}" \
+            "${{ needs.server-image.outputs.digest }}" \
+            "${{ needs.validate.outputs.console-image }}" \
+            "${{ needs.console-image.outputs.digest }}"
+
   release:
     name: GitHub Release
-    needs: [validate, server-image, console-image, binaries, smoke]
+    needs: [validate, server-image, console-image, binaries, smoke, provenance]
     runs-on: ubuntu-latest
     permissions:
       contents: write

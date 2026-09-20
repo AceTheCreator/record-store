@@ -95,6 +95,16 @@ pub trait MetadataRepository: Send + Sync {
     ) -> Result<ObjectLockState, MetadataError>;
     /// Advances the observed-time high-water mark retention is judged against.
     async fn observe_clock(&self, release: LockRelease) -> Result<(), MetadataError>;
+    /// Returns a bounded page of the versions Object Lock holds a record for.
+    ///
+    /// This scans the lock table rather than every version, because that table
+    /// contains only locked versions and is therefore already the right index.
+    /// A deployment with a million objects and ten locks pays for ten.
+    async fn list_object_locks(
+        &self,
+        after: Option<VersionId>,
+        limit: usize,
+    ) -> Result<LockedVersionPage, MetadataError>;
     async fn list_objects(
         &self,
         request: ListObjectsRequest,

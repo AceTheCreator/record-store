@@ -382,3 +382,163 @@ impl ObjectLockService {
             .map_err(|_| ServiceError::Unavailable)
     }
 }
+
+/// How much of the lock table one report reads.
+///
+/// A report is meant to be read, so it is bounded rather than complete on a
+/// deployment with an enormous number of locked versions. Truncation is
+/// reported rather than silent: a report that quietly stopped would understate
+/// what is retained, which is the one direction that matters.
+const RETENTION_REPORT_LIMIT: usize = 10_000;
+const RETENTION_REPORT_PAGE: usize = 500;
+
+/// Whether a lock record still holds its version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionStatus {
+    /// A retention period has not elapsed, a legal hold is on, or both.
+    Held,
+    /// A lock record exists but nothing it describes still holds the version.
+    Elapsed,
+}
+
+/// One bucket with Object Lock enabled.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LockedBucket {
+    /// Bucket name.
+    pub bucket: String,
+    /// The default retention new versions are born under, when one is set.
+    pub default_retention: Option<record_store_core::DefaultRetention>,
+}
+
+/// One version a lock record names.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RetainedVersion {
+    pub bucket: String,
+    pub key: String,
+    pub version_id: VersionId,
+    /// Retention mode, when a retention was applied.
+    pub retention_mode: Option<String>,
+    /// When the retention expires, when there is one.
+    pub retain_until: Option<chrono::DateTime<Utc>>,
+    /// Whether a legal hold is on.
+    pub legal_hold: bool,
+    /// Whether anything still holds this version.
+    pub status: RetentionStatus,
+}
+
+/// Which buckets have Object Lock, and what is currently held.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RetentionReport {
+    /// When the report was produced. Retention is time-relative, so a report
+    /// without its own timestamp cannot be interpreted later.
+    pub generated_at: chrono::DateTime<Utc>,
+    /// Every bucket with Object Lock enabled.
+    pub buckets: Vec<LockedBucket>,
+    /// Versions with a lock record, held and elapsed alike.
+    pub versions: Vec<RetainedVersion>,
+    /// Versions still held at `generated_at`.
+    pub held_count: u64,
+    /// Whether the scan stopped before the end of the lock table.
+    pub truncated: bool,
+}
+
+impl ObjectLockService {
+    /// Reports which buckets have Object Lock and what it currently holds.
+    ///
+    /// The scan walks the lock table, which contains only locked versions, so a
+    /// deployment with a million objects and ten locks pays for ten.
+    ///
+    /// A lock record outlives the retention it describes, so each version is
+    /// classified against the report's own timestamp rather than being reported
+    /// as held merely because a record exists.
+    pub async fn retention_report(&self) -> Result<RetentionReport, ServiceError> {
+        self.metrics.requests.fetch_add(1, Ordering::Relaxed);
+        let _permit = self.acquire().await?;
+        let generated_at = Utc::now();
+
+        let mut buckets: Vec<LockedBucket> = self
+            .metadata
+            .list_buckets()
+            .await
+            .map_err(map_metadata)?
+            .into_iter()
+            .filter_map(|bucket| {
+                bucket.object_lock.map(|configuration| LockedBucket {
+                    bucket: bucket.name.to_string(),
+                    default_retention: configuration.default_retention,
+                })
+            })
+            .collect();
+        buckets.sort_by(|left, right| left.bucket.cmp(&right.bucket));
+        let names: BTreeMap<_, _> = self
+            .metadata
+            .list_buckets()
+            .await
+            .map_err(map_metadata)?
+            .into_iter()
+            .map(|bucket| (bucket.id, bucket.name.to_string()))
+            .collect();
+
+        let mut versions = Vec::new();
+        let mut held_count = 0_u64;
+        let mut cursor = None;
+        let mut truncated = false;
+        loop {
+            let page = self
+                .metadata
+                .list_object_locks(cursor, RETENTION_REPORT_PAGE)
+                .await
+                .map_err(map_metadata)?;
+            for locked in page.versions {
+                if versions.len() >= RETENTION_REPORT_LIMIT {
+                    truncated = true;
+                    break;
+                }
+                let status = if locked.state.deletion_block_at(generated_at).is_some() {
+                    held_count += 1;
+                    RetentionStatus::Held
+                } else {
+                    RetentionStatus::Elapsed
+                };
+                versions.push(RetainedVersion {
+                    bucket: names
+                        .get(&locked.bucket_id)
+                        .cloned()
+                        .unwrap_or_else(|| locked.bucket_id.to_string()),
+                    key: locked.key.to_string(),
+                    version_id: locked.version_id,
+                    retention_mode: locked
+                        .state
+                        .retention
+                        .map(|retention| retention.mode.as_str().to_owned()),
+                    retain_until: locked
+                        .state
+                        .retention
+                        .map(|retention| retention.retain_until),
+                    legal_hold: locked.state.legal_hold,
+                    status,
+                });
+            }
+            match page.next {
+                Some(next) if !truncated => cursor = Some(next),
+                _ => break,
+            }
+        }
+        versions.sort_by(|left, right| {
+            (&left.bucket, &left.key, left.version_id.to_string()).cmp(&(
+                &right.bucket,
+                &right.key,
+                right.version_id.to_string(),
+            ))
+        });
+
+        Ok(RetentionReport {
+            generated_at,
+            buckets,
+            versions,
+            held_count,
+            truncated,
+        })
+    }
+}

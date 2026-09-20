@@ -534,6 +534,18 @@ pub fn router(state: AppState) -> Router {
             get(crate::handlers::proof::object_proof),
         )
         .route(
+            "/api/v1/audit/export",
+            get(crate::handlers::export::export_records),
+        )
+        .route(
+            "/api/v1/audit/export/manifest",
+            get(crate::handlers::export::export_manifest),
+        )
+        .route(
+            "/api/v1/reports/retention",
+            get(crate::handlers::export::retention_report),
+        )
+        .route(
             "/api/v1/buckets/{bucket}/quota",
             axum::routing::put(set_bucket_quota),
         )

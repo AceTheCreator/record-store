@@ -216,6 +216,16 @@ exercising a permission, so expiry gives way to retention and not the other way 
 Bucket-level Object Lock configuration sits under `s3:ManageBucket` alongside versioning
 and CORS, because the three are the same kind of decision about the same object.
 
+## Reporting what is retained
+
+```bash
+record-store audit-export retention-report
+```
+
+Which buckets have Object Lock, which versions are held, and when each retention
+expires — distinguishing a version still held from one whose lock record has
+outlived its date. See [Audit Export](audit-export.md).
+
 ## From the CLI
 
 ```bash

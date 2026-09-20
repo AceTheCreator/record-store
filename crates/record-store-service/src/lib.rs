@@ -18,7 +18,10 @@ mod test_support;
 
 pub use bucket::BucketService;
 pub use error::ServiceError;
-pub use lock::{LockContext, ObjectLockService, VersionLock};
+pub use lock::{
+    LockContext, LockedBucket, ObjectLockService, RetainedVersion, RetentionReport,
+    RetentionStatus, VersionLock,
+};
 pub use metrics::{ServiceMetrics, ServiceMetricsSnapshot};
 pub use object::ObjectService;
 pub use services::{ObjectLockLimits, ServiceLimits, Services};

@@ -90,6 +90,7 @@ nav:
       - Installation: getting-started/installation.md
       - Quick Start: getting-started/quick-start.md
       - First Bucket and Object: getting-started/first-object.md
+      - Migrating from MinIO: getting-started/migrating-from-minio.md
   - Concepts:
       - concepts/index.md
       - Buckets and Objects: concepts/buckets-and-objects.md
@@ -126,6 +127,7 @@ nav:
       - Lifecycle Rules: administration/lifecycle-rules.md
       - Object Lock: administration/object-lock.md
       - Audit Log: administration/audit-log.md
+      - Audit Export: administration/audit-export.md
       - Events and Webhooks: administration/events-and-webhooks.md
       - Metrics: administration/metrics.md
   - Deployment:
