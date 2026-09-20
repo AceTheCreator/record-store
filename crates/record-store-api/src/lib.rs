@@ -151,6 +151,7 @@ pub struct AppState {
     cluster: Option<ClusterManagement>,
     sharing: Option<SharingManagement>,
     sharing_metrics: Arc<SharingMetrics>,
+    proof_signer: Option<Arc<record_store_proof::BundleSigner>>,
 }
 
 /// Cluster services exposed through the authenticated management API.
@@ -234,6 +235,7 @@ impl AppState {
             cluster: None,
             sharing: None,
             sharing_metrics: Arc::new(SharingMetrics::default()),
+            proof_signer: None,
         }
     }
 
@@ -262,6 +264,17 @@ impl AppState {
     #[must_use]
     pub fn with_events(mut self, events: Arc<dyn EventRepository>) -> Self {
         self.events = Some(events);
+        self
+    }
+
+    /// Enables proof bundles, which need the deployment's signing key.
+    ///
+    /// Without it the endpoint reports that bundles are unavailable rather than
+    /// emitting an unsigned document: a bundle nobody signed proves nothing and
+    /// would be mistaken for one that does.
+    #[must_use]
+    pub fn with_proof_signer(mut self, signer: Arc<record_store_proof::BundleSigner>) -> Self {
+        self.proof_signer = Some(signer);
         self
     }
 
@@ -498,6 +511,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/buckets/{bucket}/object-lock/{*key}",
             get(get_object_lock),
+        )
+        .route(
+            "/api/v1/buckets/{bucket}/proof/{*key}",
+            get(crate::handlers::proof::object_proof),
         )
         .route(
             "/api/v1/buckets/{bucket}/quota",

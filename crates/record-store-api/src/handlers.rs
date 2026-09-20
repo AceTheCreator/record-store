@@ -9,6 +9,7 @@ pub(crate) mod lifecycle;
 pub(crate) mod maintenance;
 pub(crate) mod objects;
 pub(crate) mod policies;
+pub(crate) mod proof;
 pub(crate) mod storage;
 pub(crate) mod system;
 pub(crate) mod webhooks;

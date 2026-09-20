@@ -504,11 +504,44 @@ struct AuditArgs {
 
 #[derive(Subcommand)]
 enum VerifyCommand {
+    /// Verify an object's stored checksum, and optionally emit a proof bundle.
     Object {
         bucket: String,
         key: String,
+        /// Version to describe. Defaults to the current version.
+        #[arg(long)]
+        version_id: Option<String>,
+        /// Write a portable proof bundle to this path.
+        ///
+        /// The bundle is a signed JSON document describing the object version:
+        /// its identity, the SHA-256 recorded when it was written, and the
+        /// deployment's public verification key. It contains no credentials,
+        /// no capability tokens, and not the object itself, so it is safe to
+        /// send to whoever needs to check the file.
+        #[arg(long, value_name = "FILE")]
+        proof: Option<PathBuf>,
         #[command(flatten)]
         endpoint: EndpointArgs,
+    },
+    /// Check a proof bundle against a file, offline.
+    ///
+    /// Contacts nothing. It recomputes the file's SHA-256, checks the bundle's
+    /// signature, and prints every check it performed along with every one it
+    /// could not perform, so a passing result never claims more than it
+    /// established.
+    Proof {
+        /// The bundle to check.
+        bundle: PathBuf,
+        /// The file the bundle should describe.
+        #[arg(long, value_name = "FILE")]
+        object: PathBuf,
+        /// The deployment's published public key, hex.
+        ///
+        /// Without this the signature is only checked against the key carried
+        /// inside the bundle, which establishes that the bundle is internally
+        /// consistent but not which deployment produced it.
+        #[arg(long, value_name = "HEX")]
+        public_key: Option<String>,
     },
     Bucket {
         bucket: String,
@@ -1160,14 +1193,34 @@ async fn audit(arguments: AuditArgs, json: bool) -> Result<()> {
 
 async fn verify(command: VerifyCommand, json: bool) -> Result<()> {
     let request = match command {
+        VerifyCommand::Proof {
+            bundle,
+            object,
+            public_key,
+        } => return verify_proof(&bundle, &object, public_key.as_deref()).await,
         VerifyCommand::Object {
             bucket,
             key,
+            version_id,
+            proof,
             endpoint,
-        } => client()?.post(api_url(
-            &endpoint,
-            &format!("/api/v1/verify/objects/{bucket}/{key}"),
-        )),
+        } => {
+            if let Some(destination) = proof {
+                return write_proof_bundle(
+                    &endpoint,
+                    &bucket,
+                    &key,
+                    version_id.as_deref(),
+                    &destination,
+                    json,
+                )
+                .await;
+            }
+            client()?.post(api_url(
+                &endpoint,
+                &format!("/api/v1/verify/objects/{bucket}/{key}"),
+            ))
+        }
         VerifyCommand::Bucket { bucket, endpoint } => client()?.post(api_url(
             &endpoint,
             &format!("/api/v1/verify/buckets/{bucket}"),
@@ -1635,6 +1688,108 @@ async fn send_admin(builder: reqwest::RequestBuilder) -> Result<reqwest::Respons
         let body = response.text().await.unwrap_or_default();
         bail!("management API returned HTTP {status}: {body}")
     }
+}
+
+/// Fetches a signed proof bundle and writes it to a file.
+///
+/// The bundle is produced and signed by the server, which is what holds the
+/// deployment master key. Nothing secret reaches this process.
+async fn write_proof_bundle(
+    endpoint: &EndpointArgs,
+    bucket: &str,
+    key: &str,
+    version_id: Option<&str>,
+    destination: &std::path::Path,
+    json: bool,
+) -> Result<()> {
+    let url = api_url(endpoint, &format!("/api/v1/buckets/{bucket}/proof/{key}"));
+    let request = client()?.get(url);
+    let request = match version_id {
+        Some(version_id) => request.query(&[("version_id", version_id)]),
+        None => request,
+    };
+    let bundle = send_admin(request)
+        .await?
+        .json::<record_store_proof::ProofBundle>()
+        .await
+        .context("decode proof bundle")?;
+    let document = serde_json::to_string_pretty(&bundle).context("encode proof bundle")?;
+    tokio::fs::write(destination, document.as_bytes())
+        .await
+        .with_context(|| format!("write {}", destination.display()))?;
+    if json {
+        print_value(
+            &serde_json::json!({
+                "proof": destination.display().to_string(),
+                "key_id": bundle.deployment.key_id,
+                "version_id": bundle.object.version_id,
+            }),
+            true,
+        )?;
+    } else {
+        println!("wrote proof bundle to {}", destination.display());
+        println!(
+            "  object     {}/{}",
+            bundle.object.bucket, bundle.object.key
+        );
+        println!("  version    {}", bundle.object.version_id);
+        println!("  sha256     {}", bundle.payload.sha256);
+        println!("  signed by  {}", bundle.deployment.key_id);
+        println!(
+            "\nCheck it anywhere with:\n  record-store verify proof {} --object <file>",
+            destination.display()
+        );
+    }
+    Ok(())
+}
+
+/// Checks a proof bundle against a file without contacting anything.
+async fn verify_proof(
+    bundle_path: &std::path::Path,
+    object_path: &std::path::Path,
+    public_key: Option<&str>,
+) -> Result<()> {
+    let document = tokio::fs::read(bundle_path)
+        .await
+        .with_context(|| format!("read {}", bundle_path.display()))?;
+    let bundle: record_store_proof::ProofBundle =
+        serde_json::from_slice(&document).context("parse proof bundle")?;
+    let expected = public_key
+        .map(|value| hex::decode(value.trim()).context("decode --public-key as hex"))
+        .transpose()?;
+    let verdict = record_store_proof::verify_bundle(&bundle, object_path, expected.as_deref())
+        .await
+        .context("verify proof bundle")?;
+
+    println!(
+        "{}/{} version {}",
+        bundle.object.bucket, bundle.object.key, bundle.object.version_id
+    );
+    for check in &verdict.checks {
+        println!(
+            "  [{}] {}: {}",
+            check.status.marker(),
+            check.name,
+            check.detail
+        );
+    }
+    let unproved = verdict.unproved();
+    if verdict.is_verified() {
+        println!("\nVERIFIED: every check that could be performed passed.");
+        if !unproved.is_empty() {
+            // Naming the gaps beside the verdict is the point. A reader who
+            // stops at the word "verified" must still see what it did not cover.
+            println!("This does NOT establish:");
+            for check in unproved {
+                println!("  - {}", check.name);
+            }
+        }
+    } else {
+        println!("\nFAILED: at least one check did not pass.");
+        // A non-zero exit so a script cannot mistake failure for success.
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

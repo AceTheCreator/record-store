@@ -15,6 +15,7 @@ members = [
     "crates/record-store-core",
     "crates/record-store-metadata",
     "crates/record-store-observability",
+    "crates/record-store-proof",
     "crates/record-store-protocol",
     "crates/record-store-replication",
     "crates/record-store-rpc",
@@ -64,6 +65,9 @@ redb-v2 = { package = "redb", version = "2.6.3" }
 reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls"] }
 quick-xml = { version = "0.42.0", features = ["serialize"] }
 reed-solomon-simd = "3.1.0"
+# Already present through rustls; used directly for Ed25519 signing and
+# verification so no advisory-carrying signature crate is needed.
+ring = "0.17.14"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.143"
 sha2 = "0.11.0"

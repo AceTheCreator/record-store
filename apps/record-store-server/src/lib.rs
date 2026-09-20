@@ -349,6 +349,15 @@ pub async fn initialize(config: &Config) -> Result<ServerRuntime, StartupError> 
         config.effective_embed_base_url(),
         config.sharing.preview_text_limit_bytes,
     ));
+    // Proof bundles are signed with a key derived from the deployment master
+    // key. Without one the endpoint reports bundles as unavailable rather than
+    // emitting an unsigned document that would be mistaken for a signed one.
+    if let Some(master_key) = config.auth.credential_master_key.as_ref() {
+        management_state = management_state.with_proof_signer(Arc::new(
+            record_store_proof::BundleSigner::from_master_key(master_key.expose().as_bytes())
+                .map_err(StartupError::Proof)?,
+        ));
+    }
     if let Some(dependencies) = &cluster_dependencies {
         // Discovery never proposes storage that is already in use, so the
         // node's own data directory and every declared device are excluded.
@@ -815,6 +824,8 @@ pub enum StartupError {
     /// HTTP serving or graceful shutdown failed.
     #[error("HTTP lifecycle failed: {0}")]
     Http(record_store_api::ServerError),
+    #[error("deriving the proof bundle signing key failed: {0}")]
+    Proof(record_store_proof::ProofError),
 }
 
 #[cfg(test)]
