@@ -5,6 +5,7 @@ pub(crate) mod audit;
 pub(crate) mod buckets;
 pub(crate) mod cluster;
 pub(crate) mod credentials;
+pub(crate) mod export;
 pub(crate) mod lifecycle;
 pub(crate) mod maintenance;
 pub(crate) mod objects;

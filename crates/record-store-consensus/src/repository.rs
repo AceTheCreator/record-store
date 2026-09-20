@@ -22,10 +22,10 @@ use record_store_core::{
 };
 use record_store_metadata::{
     DeleteObjectResult, DeleteVersionResult, ListMultipartUploadsRequest,
-    ListObjectVersionsRequest, ListObjectsRequest, LockRelease, MetadataCommand, MetadataError,
-    MetadataOutcome, MetadataRepository, MultipartCleanupResult, MultipartUploadPage,
-    NewDeleteMarker, ObjectCommitResult, ObjectMetadataPage, ObjectVersionPage,
-    PayloadReferencePage,
+    ListObjectVersionsRequest, ListObjectsRequest, LockRelease, LockedVersionPage, MetadataCommand,
+    MetadataError, MetadataOutcome, MetadataRepository, MultipartCleanupResult,
+    MultipartUploadPage, NewDeleteMarker, ObjectCommitResult, ObjectMetadataPage,
+    ObjectVersionPage, PayloadReferencePage,
 };
 
 use crate::{
@@ -260,6 +260,15 @@ impl MetadataRepository for ReplicatedMetadataRepository {
         self.propose(MetadataCommand::ObserveClock { release })
             .await
             .map(|_| ())
+    }
+
+    async fn list_object_locks(
+        &self,
+        after: Option<VersionId>,
+        limit: usize,
+    ) -> Result<LockedVersionPage, MetadataError> {
+        self.barrier().await?;
+        self.local.list_object_locks(after, limit).await
     }
 
     async fn list_objects(

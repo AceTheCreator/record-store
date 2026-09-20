@@ -114,6 +114,20 @@ record-store bucket object-lock set-default <name> --mode COMPLIANCE --years 7 -
 record-store bucket object-lock status <name> <key> [--version-id <id>] --endpoint <endpoint>
 ```
 
+## `audit-export`
+
+```bash
+record-store audit-export export --from <rfc3339> --to <rfc3339> \
+  --format json|csv --out <dir> --endpoint <endpoint>
+record-store audit-export retention-report --endpoint <endpoint>
+```
+
+`export` writes a directory holding the records, a manifest, the covering
+checkpoint roots, and a `SHA256SUMS` over all three. The range is `[from, to)`,
+so adjacent exports tile without duplicating a boundary record. Both commands
+are readable with the auditor token. See
+[Audit Export](../administration/audit-export.md).
+
 `delete` requires the bucket to be empty. There is no `versioning disable` — see
 [Versioning](../concepts/versioning.md).
 

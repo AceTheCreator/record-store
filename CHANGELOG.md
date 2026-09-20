@@ -11,6 +11,48 @@ publishes, so keep it factual and written for the people upgrading.
 
 ### Added
 
+- **Auditor-facing audit export.** `record-store audit-export export --from <ts>
+  --to <ts> --format json|csv --out <dir>` writes a directory holding the records, a
+  manifest, the covering checkpoint roots, and a `SHA256SUMS` over all three. Records
+  are paged from the store and streamed to disk on both sides, so the range is never
+  held in memory.
+
+  The range is `[from, to)`. Adjacent exports therefore tile: January and February
+  together contain every record exactly once, with nothing duplicated at the boundary
+  and nothing lost. The underlying audit query treats its upper bound as inclusive,
+  so the export filters the boundary itself rather than relying on timestamp
+  precision.
+
+  `--format json` is a single streamed JSON array that parses with any JSON reader;
+  `--format csv` is RFC 4180 with a pinned column order and metadata in one JSON
+  column, so the column set never depends on the data.
+
+  Requesting an export writes an audit record naming who asked, the range, the format,
+  and an export id. It is written when the export is **authorized**, not when the
+  bytes finish, and an export that cannot be recorded is refused rather than performed
+  untracked. An export whose range includes the present will contain the record of
+  itself.
+
+- **Retention report.** `record-store audit-export retention-report` reports which
+  buckets have Object Lock, which versions are currently held, and when each retention
+  expires. It distinguishes `held` from `elapsed` — a lock record outlives the
+  retention it describes, and reporting an expired retention as active would overstate
+  what is protected. The scan walks the Object Lock table, which holds only locked
+  versions, so a deployment with a million objects and ten locks pays for ten. Bounded,
+  with truncation reported rather than silent.
+
+- Both are readable with the existing **auditor** management role and available over
+  the management API (`GET /api/v1/audit/export`, `/api/v1/audit/export/manifest`,
+  `/api/v1/reports/retention`), not only the CLI.
+
+- Documentation: [Audit Export](docs/administration/audit-export.md), including what an
+  export does and does not prove. `SHA256SUMS` establishes that the copy reached you
+  unaltered; it does not establish that the log was not edited before the copy was
+  taken. **`checkpoints.json` is always written and currently reports
+  `chain_not_enabled`**, because the tamper-evident audit chain is not built yet — an
+  explicit status rather than an omitted file, so an unanchored copy is not mistaken
+  for an anchored one.
+
 - **Portable proof bundles.** `record-store verify object <bucket> <key>
   [--version-id ID] --proof <out.json>` emits a signed JSON document describing one
   immutable object version: its identity, the SHA-256 recorded at write time, the

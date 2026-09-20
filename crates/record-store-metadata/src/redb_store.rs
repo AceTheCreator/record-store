@@ -828,6 +828,78 @@ impl MetadataRepository for RedbMetadataRepository {
         }).await?
     }
 
+    async fn list_object_locks(
+        &self,
+        after: Option<VersionId>,
+        limit: usize,
+    ) -> Result<LockedVersionPage, MetadataError> {
+        if limit == 0 || limit > 1_000 {
+            return Err(MetadataError::Database {
+                operation: "list object locks",
+                reason: "limit must be between 1 and 1000".into(),
+            });
+        }
+        let db = Arc::clone(&self.database);
+        tokio::task::spawn_blocking(move || {
+            let read = db
+                .begin_read()
+                .map_err(|e| backend("begin object lock list", e))?;
+            let locks = read
+                .open_table(OBJECT_LOCKS)
+                .map_err(|e| backend("open object locks", e))?;
+            let versions = read
+                .open_table(VERSIONS)
+                .map_err(|e| backend("open versions", e))?;
+            // The cursor is the previous page's last key, so the scan resumes
+            // immediately after it rather than re-reading it.
+            let start = after.map_or_else(Vec::new, |id| {
+                let mut key = lock_key(id);
+                key.push(0);
+                key
+            });
+            let mut page = LockedVersionPage::default();
+            for entry in locks
+                .range(start.as_slice()..)
+                .map_err(|e| backend("range object locks", e))?
+            {
+                let (key, value) = entry.map_err(|e| backend("read object lock", e))?;
+                if page.versions.len() == limit {
+                    page.next = page.versions.last().map(|locked| locked.version_id);
+                    break;
+                }
+                let state: ObjectLockState = serde_json::from_slice(value.value())?;
+                // The lock table stores state only, so identity is recovered
+                // from the version record it annotates. Keeping bucket and key
+                // in one place stops the two tables from disagreeing about
+                // which object a lock belongs to.
+                let Some(record) = versions
+                    .get(key.value())
+                    .map_err(|e| backend("resolve locked version", e))?
+                    .map(|value| serde_json::from_slice::<ObjectVersionRecord>(value.value()))
+                    .transpose()?
+                else {
+                    continue;
+                };
+                let (bucket_id, object_key) = match &record {
+                    ObjectVersionRecord::Object { metadata, .. } => {
+                        (metadata.bucket_id, metadata.key.clone())
+                    }
+                    ObjectVersionRecord::DeleteMarker { marker, .. } => {
+                        (marker.bucket_id, marker.key.clone())
+                    }
+                };
+                page.versions.push(LockedVersion {
+                    bucket_id,
+                    key: object_key,
+                    version_id: record.version_id(),
+                    state,
+                });
+            }
+            Ok(page)
+        })
+        .await?
+    }
+
     async fn list_payload_references(
         &self,
         after: Option<ObjectId>,

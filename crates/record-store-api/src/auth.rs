@@ -255,6 +255,10 @@ impl ManagementPrincipal {
                         || path == "/api/v1/system/info"
                         || path == "/api/v1/events"
                         || path == "/api/v1/audit/events"
+                        // Exporting the trail and reading what is retained are
+                        // the questions an auditor exists to ask.
+                        || path.starts_with("/api/v1/audit/export")
+                        || path == "/api/v1/reports/retention"
                         || path == "/api/v1/storage/status"
                         || path == "/api/v1/storage/usage"
                         || path == "/api/v1/storage/inspect"
