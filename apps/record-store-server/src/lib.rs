@@ -12,6 +12,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use chrono::Utc;
 use record_store_api::{
     AppState, ClusterManagement, ManagementAuth, MetricsAuth, SharingManagement,
 };
@@ -48,6 +49,8 @@ pub struct ServerRuntime {
     cleanup_storage: Arc<dyn ObjectStore>,
     clock_services: Services,
     clock_watermark_interval: Duration,
+    metrics_history: Arc<record_store_api::history::MetricsHistory>,
+    metrics_services: Services,
     cluster_process: Option<cluster::ClusterProcess>,
 }
 
@@ -76,6 +79,7 @@ impl ServerRuntime {
         let cleanup_shutdown = lifecycle_shutdown.clone();
         let cluster_shutdown = lifecycle_shutdown.clone();
         let clock_shutdown = lifecycle_shutdown.clone();
+        let metrics_shutdown = lifecycle_shutdown.clone();
         tokio::try_join!(
             async {
                 record_store_api::serve(
@@ -118,6 +122,15 @@ impl ServerRuntime {
                     self.clock_services,
                     self.clock_watermark_interval,
                     clock_shutdown,
+                )
+                .await;
+                Ok::<(), StartupError>(())
+            },
+            async {
+                run_metrics_sampler(
+                    self.metrics_services,
+                    self.metrics_history,
+                    metrics_shutdown,
                 )
                 .await;
                 Ok::<(), StartupError>(())
@@ -332,6 +345,8 @@ pub async fn initialize(config: &Config) -> Result<ServerRuntime, StartupError> 
         },
         TicketIssuer::derive(sharing_key_material.as_bytes())?,
     ));
+    // One ring, shared: the sampler writes it and the endpoint reads it.
+    let metrics_history = Arc::new(record_store_api::history::MetricsHistory::new(Utc::now()));
     let mut management_state = AppState::new(
         storage_dependency,
         metadata_dependency,
@@ -342,6 +357,7 @@ pub async fn initialize(config: &Config) -> Result<ServerRuntime, StartupError> 
         env!("CARGO_PKG_VERSION"),
     )
     .with_mode(config.server.mode)
+    .with_metrics_history(Arc::clone(&metrics_history))
     .with_events(Arc::clone(&event_dependency))
     .with_sharing(SharingManagement::new(
         Arc::clone(&sharing_service),
@@ -434,10 +450,12 @@ pub async fn initialize(config: &Config) -> Result<ServerRuntime, StartupError> 
         lifecycle_worker,
         process_lock,
         cleanup_storage,
-        clock_services: services,
+        clock_services: services.clone(),
         clock_watermark_interval: Duration::from_secs(
             config.object_lock.clock_watermark_interval_seconds,
         ),
+        metrics_history,
+        metrics_services: services,
         cluster_process: cluster_dependencies.map(|dependencies| dependencies.process),
     })
 }
@@ -521,6 +539,31 @@ async fn run_clock_watermark(
         // already logged it. Nothing else to do but keep checking: the clock
         // may yet be corrected.
         let _ = services.locks.observe_clock().await;
+    })
+    .await;
+}
+
+/// Samples the service counters into the bounded history the console reads.
+///
+/// A rate needs two readings, so somebody has to wait for the second one. Doing
+/// it here means the server waits, in the background, from the moment it starts
+/// — rather than the person who opened the metrics page waiting while it
+/// happens in front of them.
+///
+/// One sample is taken immediately so a node that has only just started still
+/// answers with something, and the ring is bounded, so this runs for months
+/// without growing.
+async fn run_metrics_sampler(
+    services: Services,
+    history: Arc<record_store_api::history::MetricsHistory>,
+    cancellation: CancellationToken,
+) {
+    history.observe(Utc::now(), services.metrics.snapshot());
+    let interval = Duration::from_secs(record_store_api::history::SAMPLE_INTERVAL_SECONDS);
+    run_observation_loop(interval, cancellation, || async {
+        // Reading four atomics cannot fail, so there is nothing to report and
+        // nothing that could hold up a shutdown.
+        history.observe(Utc::now(), services.metrics.snapshot());
     })
     .await;
 }

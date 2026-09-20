@@ -53,6 +53,11 @@ publishes, so keep it factual and written for the people upgrading.
   explicit status rather than an omitted file, so an unanchored copy is not mistaken
   for an anchored one.
 
+- `GET /api/v1/system/metrics/history` returns the last hour of counter readings, taken
+  by the server every 15 seconds and held in a bounded in-memory ring (240 samples, a
+  few tens of kilobytes). Samples are counters rather than rates, the way a scraper
+  sees them.
+
 - **Portable proof bundles.** `record-store verify object <bucket> <key>
   [--version-id ID] --proof <out.json>` emits a signed JSON document describing one
   immutable object version: its identity, the SHA-256 recorded at write time, the
@@ -143,6 +148,22 @@ publishes, so keep it factual and written for the people upgrading.
   directory.
 
 ### Changed
+
+- **The console's metrics charts draw immediately instead of filling in over minutes.**
+  Record Store exposes counters, so a rate can only come from comparing two readings.
+  The console did all of that comparing itself, which meant it could only show a rate
+  it had personally watched happen: nothing on the first paint, one point after the
+  second poll, a trend that took minutes to fill, and a page reload that threw the
+  whole window away. It now seeds its window from the server's readings, so the waiting
+  happens in the background before anyone opens the page.
+
+  The data path was never the problem — that endpoint answers in about five
+  milliseconds and does not get slower as the store grows.
+
+  Seeding is a convenience and is treated as one: a server too old to know the path, or
+  any unrecognisable response, leaves the screen working exactly as it did before
+  rather than failing. The history is in memory only and resets on restart, which the
+  endpoint reports through `started_at` rather than hiding.
 
 - The metadata schema moves from version 4 to 5, adding an Object Lock table and a clock
   table. The migration is ordered and non-destructive: nothing is rewritten, a v4 bucket

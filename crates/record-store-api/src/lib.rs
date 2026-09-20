@@ -152,6 +152,7 @@ pub struct AppState {
     sharing: Option<SharingManagement>,
     sharing_metrics: Arc<SharingMetrics>,
     proof_signer: Option<Arc<record_store_proof::BundleSigner>>,
+    metrics_history: Arc<crate::history::MetricsHistory>,
 }
 
 /// Cluster services exposed through the authenticated management API.
@@ -236,6 +237,7 @@ impl AppState {
             sharing: None,
             sharing_metrics: Arc::new(SharingMetrics::default()),
             proof_signer: None,
+            metrics_history: Arc::new(crate::history::MetricsHistory::new(chrono::Utc::now())),
         }
     }
 
@@ -264,6 +266,16 @@ impl AppState {
     #[must_use]
     pub fn with_events(mut self, events: Arc<dyn EventRepository>) -> Self {
         self.events = Some(events);
+        self
+    }
+
+    /// Shares the counter history the metrics screen is seeded from.
+    ///
+    /// The sampler and the handler must hold the same ring, or the endpoint
+    /// would answer from one that nothing ever writes to.
+    #[must_use]
+    pub fn with_metrics_history(mut self, history: Arc<crate::history::MetricsHistory>) -> Self {
+        self.metrics_history = history;
         self
     }
 
@@ -352,6 +364,7 @@ mod auth;
 mod dto;
 mod error;
 mod handlers;
+pub mod history;
 mod metrics;
 
 #[cfg(test)]
@@ -366,6 +379,10 @@ pub fn router(state: AppState) -> Router {
     let administrative = Router::new()
         .route("/api/v1/system/info", get(system_info))
         .route("/api/v1/system/metrics", get(system_metrics))
+        .route(
+            "/api/v1/system/metrics/history",
+            get(crate::metrics::system_metrics_history),
+        )
         .route("/api/v1/auth/session", get(auth_session))
         .route("/api/v1/storage/status", get(storage_status))
         .route("/api/v1/storage/usage", get(storage_usage))

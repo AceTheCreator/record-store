@@ -107,9 +107,23 @@ test.describe('standalone deployment', () => {
     await page.goto('/metrics');
 
     await expect(page.getByRole('heading', { name: 'Metrics' })).toBeVisible();
-    // One counter reading is not a rate, so the first paint says so.
-    await expect(page.getByText('Collecting…').first()).toBeVisible();
     await expect(page.getByText(/Requests served|Requests/).first()).toBeVisible();
+
+    // A rate needs two readings. The server takes its own, so the screen is
+    // seeded with readings somebody already waited for and shows a measured
+    // rate rather than standing at "Collecting…" until it has watched two polls
+    // go by itself.
+    //
+    // This used to assert "Collecting…" was visible. That became a race the
+    // moment the window could be seeded — whether the placeholder ever painted
+    // depended on which of the two reads resolved first — so it now asserts the
+    // guarantee that actually holds.
+    await expect(page.getByText(/req\/s/).first()).toBeVisible();
+
+    // Still nothing invented: the screen reports the span it actually measured,
+    // so a short window is never presented as a long-run average. Matched with
+    // its value, because the page description mentions the phrase too.
+    await expect(page.getByText(/Observed window \d/)).toBeVisible();
   });
 
   test('health reports disabled cluster parts as not enabled, not failed', async ({ signedIn }) => {

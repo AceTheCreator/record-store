@@ -465,6 +465,17 @@ pub(crate) async fn system_metrics(
     gather_metrics(&state, &request_id).await.map(Json)
 }
 
+/// Returns the counter history the metrics screen seeds its charts from.
+///
+/// The server has been sampling since it started, so this answers the first
+/// paint with a window somebody already waited for. The console still polls for
+/// live readings; this is only what it starts from.
+pub(crate) async fn system_metrics_history(
+    State(state): State<AppState>,
+) -> Json<crate::history::MetricsHistoryResponse> {
+    Json(state.metrics_history.response())
+}
+
 #[cfg(test)]
 mod tests {
     use axum::body::Body;
