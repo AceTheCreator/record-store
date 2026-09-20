@@ -276,19 +276,30 @@ async fn a_bundle_without_history_reports_history_and_anchor_as_not_proved() {
 
 /// Builds a history section over a synthetic checkpoint, the way the audit
 /// store will once it maintains one.
-fn history_with_records(count: usize, first_sequence: u64) -> (History, Vec<Digest32>) {
-    let record_hashes: Vec<Digest32> = (0..count)
+///
+/// The checkpoint covers `leaf_count` consecutive records starting at
+/// `first_sequence`, and its Merkle tree is built over all of them. A bundle
+/// carries only the records touching one object version, so `included` names
+/// which of those positions appear in the section — but a record's inclusion
+/// path is its path in the *checkpoint's* tree, at index
+/// `sequence - from_sequence`, not its position in the excerpt. Building the
+/// tree over the excerpt instead would produce a checkpoint whose leaf count
+/// disagreed with the range it claims, which is now itself a finding.
+fn history_over(
+    first_sequence: u64,
+    leaf_count: usize,
+    included: &[usize],
+) -> (History, Vec<Digest32>) {
+    let record_hashes: Vec<Digest32> = (0..leaf_count)
         .map(|index| Sha256::digest(format!("audit-record-{index}")).into())
         .collect();
     let root = merkle::root(&record_hashes).expect("root");
-    let records = record_hashes
+    let records = included
         .iter()
-        .enumerate()
-        .map(|(index, hash)| HistoryRecord {
+        .map(|&index| HistoryRecord {
             sequence: first_sequence + index as u64,
-            timestamp: Utc
-                .with_ymd_and_hms(2026, 3, 1, 10, index as u32, 0)
-                .unwrap(),
+            timestamp: Utc.with_ymd_and_hms(2026, 3, 1, 10, 0, 0).unwrap()
+                + chrono::Duration::minutes(index as i64),
             operation: "s3:PUT".into(),
             principal: "service_account:app".into(),
             result: "success".into(),
@@ -297,7 +308,7 @@ fn history_with_records(count: usize, first_sequence: u64) -> (History, Vec<Dige
             } else {
                 record_hashes[index - 1]
             }),
-            record_hash: hex::encode(hash),
+            record_hash: hex::encode(record_hashes[index]),
             inclusion_path: merkle::inclusion_path(&record_hashes, index).expect("path"),
         })
         .collect();
@@ -307,7 +318,8 @@ fn history_with_records(count: usize, first_sequence: u64) -> (History, Vec<Dige
             checkpoint: Checkpoint {
                 sequence: 7,
                 from_sequence: first_sequence,
-                to_sequence: first_sequence + count as u64 - 1,
+                to_sequence: first_sequence + leaf_count as u64 - 1,
+                leaf_count: leaf_count as u64,
                 root: hex::encode(root),
                 previous_checkpoint_hash: hex::encode([1_u8; 32]),
             },
@@ -315,6 +327,12 @@ fn history_with_records(count: usize, first_sequence: u64) -> (History, Vec<Dige
         },
         record_hashes,
     )
+}
+
+/// A checkpoint whose every record is in the bundle.
+fn history_with_records(count: usize, first_sequence: u64) -> (History, Vec<Digest32>) {
+    let included: Vec<usize> = (0..count).collect();
+    history_over(first_sequence, count, &included)
 }
 
 #[tokio::test]
@@ -359,6 +377,99 @@ async fn a_record_that_is_not_under_the_checkpoint_root_fails_inclusion() {
     assert!(!verdict.is_verified());
 }
 
+/// The leaf count is inside the signed bytes, not merely beside them. If it
+/// were not, an operator could publish a tree of one size and relabel it later
+/// without breaking anything a verifier checks.
+#[tokio::test]
+async fn changing_only_the_checkpoint_leaf_count_breaks_the_signature() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let payload = b"the authoritative copy";
+    let path = write_file(directory.path(), "object.bin", payload).await;
+    let (history, _) = history_with_records(5, 100);
+    let mut bundle = bundle_for(payload, history);
+    if let History::Present { checkpoint, .. } = &mut bundle.history {
+        checkpoint.leaf_count += 1;
+    }
+    let bundle = through_json(&bundle);
+
+    let verdict = verify_bundle(&bundle, &path, None).await.expect("verify");
+
+    assert_eq!(
+        status_of(&verdict, "bundle signature").status,
+        CheckStatus::Failed
+    );
+    assert!(!verdict.is_verified());
+}
+
+/// The attack the leaf count exists to catch: a checkpoint that claims a range
+/// of 41 records but whose tree was built from 40. Every proof for the 40 that
+/// remain still folds to the published root, so inclusion passes — and the
+/// bundle is signed, so the signature passes too. Only the count disagreeing
+/// with the range says that a record covered by this checkpoint is missing
+/// from the tree that commits to it.
+#[tokio::test]
+async fn a_checkpoint_whose_tree_is_short_of_its_range_is_reported() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let payload = b"the authoritative copy";
+    let path = write_file(directory.path(), "object.bin", payload).await;
+    let (mut history, _) = history_with_records(40, 100);
+    if let History::Present { checkpoint, .. } = &mut history {
+        checkpoint.to_sequence = 140;
+    }
+    let bundle = through_json(&bundle_for(payload, history));
+
+    let verdict = verify_bundle(&bundle, &path, None).await.expect("verify");
+
+    assert_eq!(
+        status_of(&verdict, "bundle signature").status,
+        CheckStatus::Passed
+    );
+    assert_eq!(
+        status_of(&verdict, "audit inclusion").status,
+        CheckStatus::Passed
+    );
+    let range = status_of(&verdict, "checkpoint range");
+    assert_eq!(range.status, CheckStatus::Failed);
+    assert!(range.detail.contains("41 records"), "{}", range.detail);
+    assert!(range.detail.contains("missing"), "{}", range.detail);
+    assert!(!verdict.is_verified());
+}
+
+/// A path whose length is not the one its index takes in a tree of the claimed
+/// size is rejected on its shape, before its digests are compared with
+/// anything. Index 4 of a five-leaf tree is promoted twice and joins at the top
+/// in a single step; in the eight-leaf tree this checkpoint claims, the same
+/// index would take three.
+#[tokio::test]
+async fn a_path_of_the_wrong_length_for_the_claimed_tree_is_rejected() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let payload = b"the authoritative copy";
+    let path = write_file(directory.path(), "object.bin", payload).await;
+    let (mut history, _) = history_over(100, 5, &[4]);
+    if let History::Present { checkpoint, .. } = &mut history {
+        // Claim an eight-leaf tree, and stretch the range to match so that the
+        // range check has nothing to say and the path length stands alone.
+        checkpoint.leaf_count = 8;
+        checkpoint.to_sequence = 107;
+    }
+    let bundle = through_json(&bundle_for(payload, history));
+
+    let verdict = verify_bundle(&bundle, &path, None).await.expect("verify");
+
+    assert_eq!(
+        status_of(&verdict, "checkpoint range").status,
+        CheckStatus::Passed
+    );
+    let inclusion = status_of(&verdict, "audit inclusion");
+    assert_eq!(inclusion.status, CheckStatus::Failed);
+    assert!(
+        inclusion.detail.contains("8 leaves"),
+        "{}",
+        inclusion.detail
+    );
+    assert!(!verdict.is_verified());
+}
+
 #[tokio::test]
 async fn a_broken_link_between_adjacent_records_is_reported() {
     let directory = tempfile::tempdir().expect("temporary directory");
@@ -393,20 +504,10 @@ async fn non_adjacent_records_report_links_as_not_proved_rather_than_passed() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let payload = b"the authoritative copy";
     let path = write_file(directory.path(), "object.bin", payload).await;
-    let (mut history, hashes) = history_with_records(3, 100);
-    if let History::Present {
-        records,
-        checkpoint,
-        ..
-    } = &mut history
-    {
-        records[0].sequence = 10;
-        records[1].sequence = 40;
-        records[2].sequence = 90;
-        checkpoint.from_sequence = 10;
-        checkpoint.to_sequence = 90;
-        checkpoint.root = hex::encode(merkle::root(&hashes).expect("root"));
-    }
+    // A checkpoint over 81 records, of which this object touched three. The
+    // gaps are real rather than faked by renumbering, so the inclusion paths
+    // are the ones the checkpoint's own tree produces.
+    let (history, _) = history_over(10, 81, &[0, 30, 80]);
     let bundle = through_json(&bundle_for(payload, history));
 
     let verdict = verify_bundle(&bundle, &path, None).await.expect("verify");
@@ -417,6 +518,10 @@ async fn non_adjacent_records_report_links_as_not_proved_rather_than_passed() {
     );
     assert_eq!(
         status_of(&verdict, "audit inclusion").status,
+        CheckStatus::Passed
+    );
+    assert_eq!(
+        status_of(&verdict, "checkpoint range").status,
         CheckStatus::Passed
     );
 }

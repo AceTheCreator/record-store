@@ -164,6 +164,7 @@ nav:
       - Ports: reference/ports.md
       - S3 Compatibility: reference/s3-compatibility.md
       - Proof Bundle Format: reference/proof-bundle.md
+      - Audit Chain and Checkpoints: reference/audit-chain.md
       - Management API: reference/management-api.md
       - Error Reference: reference/errors.md
       - Glossary: reference/glossary.md

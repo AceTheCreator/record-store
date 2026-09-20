@@ -180,6 +180,23 @@ only as an inactive optional serialization backend of `rust_decimal` through
 `rust_decimal` 1.43.0 dropped that optional backend. `--deny warnings` additionally
 makes a yanked crate a failure rather than a note.
 
+One dependency decision is settled ahead of the code that needs it, with the
+condition that ends it. On 2026-09-19, RFC 3161 anchoring was decided on `der`
+0.7 and `cms` 0.2, because `cms` 0.3 exists only as `0.3.0-pre.2`, and a
+pre-release — which promises no compatibility and can be yanked or re-cut under
+the same version — is not acceptable in a project built with `--deny warnings`.
+**Revisit when `cms` 0.3 reaches a stable release.** Neither crate is in
+`Cargo.lock` yet; they arrive with the anchoring work, and they will bring a
+duplicate `const-oid` with them — 0.9.6 through `der` 0.7 alongside the 0.10.2
+already present through `digest` 0.11. That was weighed and accepted: there is no
+advisory against either, and `rsa`, the crate that would make an ASN.1 stack an
+audit problem, stays out of the tree. Because the two versions give unrelated
+`ObjectIdentifier` types, SHA-256's identifier is defined locally in
+`crates/record-store-proof/src/anchor.rs` and checked against the X.690 encoding
+rules, so the duplication cannot surface as a confusing comparison failure while
+parsing a `TSTInfo`. The decision and its removal condition are recorded in
+[Audit Chain and Checkpoints](https://openelementslabs.github.io/record-store/reference/audit-chain/).
+
 The parsers that run before a request is authenticated are fuzzed. Targets live in
 [`fuzz/`](fuzz/) and cover the S3 XML request bodies, the `Authorization` header, the
 presigned-URL query, the `Range` header, the ListObjectsV2 query, and bucket-name and

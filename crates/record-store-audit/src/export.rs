@@ -138,11 +138,16 @@ impl CheckpointCoverage {
 }
 
 /// One checkpoint root covering part of an exported range.
+///
+/// Carries the leaf count for the same reason the checkpoint itself does: a
+/// root without the number of leaves under it cannot be checked for having
+/// quietly lost one. See [`crate::checkpoint::Checkpoint`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportedCheckpoint {
     pub sequence: u64,
     pub from_sequence: u64,
     pub to_sequence: u64,
+    pub leaf_count: u64,
     pub root: String,
 }
 

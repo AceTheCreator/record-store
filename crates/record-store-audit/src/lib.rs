@@ -11,6 +11,7 @@ use thiserror::Error;
 
 pub mod canonical;
 pub mod chain;
+pub mod checkpoint;
 pub mod export;
 pub mod merkle;
 
@@ -98,6 +99,18 @@ pub enum AuditError {
     InvalidExportFormat,
     #[error("an export range must end after it begins")]
     InvalidExportRange,
+    #[error("a checkpoint must cover at least one record")]
+    EmptyCheckpoint,
+    #[error(
+        "a checkpoint over sequences {from}..={to} covers {covered} records, not the \
+         {leaf_count} its leaf count claims"
+    )]
+    CheckpointLeafCount {
+        from: u64,
+        to: u64,
+        covered: u64,
+        leaf_count: u64,
+    },
 }
 
 #[derive(Clone)]
