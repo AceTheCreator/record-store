@@ -13,7 +13,51 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/OpenElementsLabs/record-store?label=license&color=195477" alt="Apache-2.0 license"></a>
 </p>
 
-[Record Store](https://record-store.io) is a self-hosted, S3-compatible object storage service written in Rust. It runs as a single process on one server, with no external database, message broker, or coordination service alongside it. Public S3 traffic uses port 7600, the native management API uses 7601, and the web console uses 7602. Every listener is configurable. Record Store is provided and maintained by [Open Elements®](https://open-elements.com).
+[Record Store](https://record-store.io) is a self-hosted, S3-compatible **records
+store**: one authoritative copy of an object, integrity you can prove to somebody
+else, history you can hold a deployment to, and share and embed links that make a
+stored object usable without copying it somewhere else.
+
+That is a different job from a general object store. A records store is what you
+reach for when the question is not "where did we put the file" but "can we show
+this is the file, unchanged, and show who touched it". Record Store is built for
+the second question:
+
+- **One authoritative copy.** Payloads are immutable and addressed by generated
+  identifiers, versioning keeps history rather than overwriting it, and an object
+  written over S3 and one written through the console are the same object under the
+  same rules. There is no second copy to drift.
+- **Provable integrity.** Every payload is checksummed on write and verified on
+  read. [Object Lock](https://openelementslabs.github.io/record-store/administration/object-lock/)
+  enforces `GOVERNANCE` and `COMPLIANCE` retention and legal holds, so a retained
+  version refuses deletion by anyone — including the root credential.
+  [Proof bundles](https://openelementslabs.github.io/record-store/reference/proof-bundle/)
+  are signed documents a third party can check **offline**, against the file and
+  nothing else: no server, no network, no credential.
+- **Provable history.** A durable audit trail records who did what, separately from
+  the storage-event feed. Making that trail *tamper-evident* — a hash chain,
+  checkpoints, and external anchoring, so a past state is provable against someone
+  with disk access — is in progress and not yet shipped. Proof bundles already carry
+  the section and report it as unavailable rather than implying it is covered.
+- **Usable links.** A [share link](https://openelementslabs.github.io/record-store/guides/share-links/)
+  gives a person read access to one object; an
+  [embed link](https://openelementslabs.github.io/record-store/guides/embed-links/)
+  gives a site or an application read-only bytes. Both are capabilities, not
+  credentials, and both resolve through the same authoritative object.
+
+**A deployment is one process on one machine, with one copy of your data.** No
+external database, message broker, or coordination service runs alongside it.
+Durability is whatever the storage underneath it gives you, so use redundant disks
+and take [backups](https://openelementslabs.github.io/record-store/operations/backup-and-restore/);
+if the machine is gone, the service is down until you restore it. Replication and
+erasure coding are not implemented, and the honest reason is that they are
+substantial work we intend to fund with adoption rather than ship ahead of it.
+Single-node is the supported shape today, and we would rather say so than imply a
+cluster story we cannot stand behind.
+
+Public S3 traffic uses port 7600, the native management API uses 7601, and the web
+console uses 7602. Every listener is configurable. Record Store is provided and
+maintained by [Open Elements®](https://open-elements.com).
 
 ## Documentation
 

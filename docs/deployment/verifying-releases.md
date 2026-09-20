@@ -52,6 +52,26 @@ gh attestation verify \
   --repo OpenElementsLabs/record-store
 ```
 
+### Binary archives
+
+The `.tar.gz` archives carry their own provenance, so a binary downloaded and run
+directly — with no registry in between — can be checked the same way:
+
+```bash
+gh attestation verify record-store-0.1.3-linux-amd64.tar.gz \
+  --repo OpenElementsLabs/record-store
+```
+
+### The release refuses to publish without this
+
+Provenance is not a step that might have run. The release workflow verifies every
+attestation — both image indexes, every per-architecture SBOM, and every binary
+archive — against the public attestation service before the GitHub Release is
+created, and refuses to create it if any is missing.
+
+So if a release exists, its attestations existed at publication. If verification
+fails for you now, that is worth reporting rather than working around.
+
 ## Checksums
 
 The release publishes a `SHA256SUMS` file covering every asset attached to it.
