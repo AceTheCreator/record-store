@@ -126,6 +126,7 @@ nav:
       - Lifecycle Rules: administration/lifecycle-rules.md
       - Object Lock: administration/object-lock.md
       - Audit Log: administration/audit-log.md
+      - Audit Export: administration/audit-export.md
       - Events and Webhooks: administration/events-and-webhooks.md
       - Metrics: administration/metrics.md
   - Deployment:

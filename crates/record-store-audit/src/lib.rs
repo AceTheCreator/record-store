@@ -11,6 +11,7 @@ use thiserror::Error;
 
 pub mod canonical;
 pub mod chain;
+pub mod export;
 pub mod merkle;
 
 const EVENTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("audit_events.v1");
@@ -93,6 +94,10 @@ pub enum AuditError {
     InvalidLimit,
     #[error("a digest must be 32 bytes of hex")]
     InvalidDigest,
+    #[error("an export format must be json or csv")]
+    InvalidExportFormat,
+    #[error("an export range must end after it begins")]
+    InvalidExportRange,
 }
 
 #[derive(Clone)]

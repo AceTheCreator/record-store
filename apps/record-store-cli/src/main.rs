@@ -55,6 +55,11 @@ enum Command {
     },
     /// Query the durable security audit trail.
     Audit(AuditArgs),
+    /// Export the audit trail, or report what Object Lock holds.
+    AuditExport {
+        #[command(subcommand)]
+        command: AuditExportCommand,
+    },
     /// Verify persisted checksums.
     Verify {
         #[command(subcommand)]
@@ -503,6 +508,41 @@ struct AuditArgs {
 }
 
 #[derive(Subcommand)]
+enum AuditExportCommand {
+    /// Write a bounded, streamed export of an audit range to a directory.
+    ///
+    /// The directory holds the records, a manifest naming the range and who
+    /// exported it, the covering checkpoint roots, and a SHA256SUMS file over
+    /// all three. The export never loads the range into memory, and the server
+    /// records that it was made.
+    ///
+    /// SHA256SUMS establishes that the copy reached you unaltered. It does not
+    /// establish that the log was not edited before the copy was taken; only a
+    /// checkpoint covering the range does that.
+    Export {
+        /// Start of the range, RFC 3339. Inclusive.
+        #[arg(long)]
+        from: String,
+        /// End of the range, RFC 3339. Exclusive, so adjacent exports tile.
+        #[arg(long)]
+        to: String,
+        /// Record format.
+        #[arg(long, default_value = "json", value_parser = ["json", "csv"])]
+        format: String,
+        /// Directory to create and write the export into.
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+        #[command(flatten)]
+        endpoint: EndpointArgs,
+    },
+    /// Report which buckets have Object Lock and what it currently holds.
+    RetentionReport {
+        #[command(flatten)]
+        endpoint: EndpointArgs,
+    },
+}
+
+#[derive(Subcommand)]
 enum VerifyCommand {
     /// Verify an object's stored checksum, and optionally emit a proof bundle.
     Object {
@@ -711,6 +751,7 @@ async fn main() -> Result<()> {
         Command::Policy { command } => policy(command, json).await?,
         Command::Webhook { command } => webhook(command, json).await?,
         Command::Audit(arguments) => audit(arguments, json).await?,
+        Command::AuditExport { command } => audit_export(command, json).await?,
         Command::Verify { command } => verify(command, json).await?,
         Command::Storage { command } => storage(command, json).await?,
         Command::Cluster { command } => cluster(command, json).await?,
@@ -1792,6 +1833,143 @@ async fn verify_proof(
     Ok(())
 }
 
+/// Runs the auditor-facing export commands.
+async fn audit_export(command: AuditExportCommand, json: bool) -> Result<()> {
+    match command {
+        AuditExportCommand::RetentionReport { endpoint } => {
+            let request = client()?.get(api_url(&endpoint, "/api/v1/reports/retention"));
+            let value = send_admin(request)
+                .await?
+                .json::<serde_json::Value>()
+                .await
+                .context("decode retention report")?;
+            print_value(&value, json)
+        }
+        AuditExportCommand::Export {
+            from,
+            to,
+            format,
+            out,
+            endpoint,
+        } => write_audit_export(&endpoint, &from, &to, &format, &out, json).await,
+    }
+}
+
+/// Writes an export directory: records, manifest, checkpoints and SHA256SUMS.
+///
+/// The records are streamed to disk and hashed as they pass, so an export of a
+/// year costs one buffer rather than a year of memory, and SHA256SUMS needs no
+/// second read of the file.
+async fn write_audit_export(
+    endpoint: &EndpointArgs,
+    from: &str,
+    to: &str,
+    format: &str,
+    out: &std::path::Path,
+    json: bool,
+) -> Result<()> {
+    use sha2::{Digest, Sha256};
+
+    // The manifest is fetched first: it is what records the export in the audit
+    // trail, so a refused export never streams a single record.
+    let manifest_request = client()?
+        .get(api_url(endpoint, "/api/v1/audit/export/manifest"))
+        .query(&[("from", from), ("to", to), ("format", format)]);
+    let manifest = send_admin(manifest_request)
+        .await?
+        .json::<serde_json::Value>()
+        .await
+        .context("decode export manifest")?;
+    let record_file = manifest["record_file"]
+        .as_str()
+        .context("manifest names no record file")?
+        .to_owned();
+
+    tokio::fs::create_dir_all(out)
+        .await
+        .with_context(|| format!("create {}", out.display()))?;
+
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest).context("encode manifest")?;
+    let checkpoint_bytes =
+        serde_json::to_vec_pretty(&manifest["checkpoints"]).context("encode checkpoints")?;
+    tokio::fs::write(out.join("manifest.json"), &manifest_bytes)
+        .await
+        .context("write manifest.json")?;
+    tokio::fs::write(out.join("checkpoints.json"), &checkpoint_bytes)
+        .await
+        .context("write checkpoints.json")?;
+
+    let records_request = client()?
+        .get(api_url(endpoint, "/api/v1/audit/export"))
+        .query(&[("from", from), ("to", to), ("format", format)]);
+    let mut response = send_admin(records_request).await?;
+    let records_path = out.join(&record_file);
+    let mut file = tokio::fs::File::create(&records_path)
+        .await
+        .with_context(|| format!("create {}", records_path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut bytes_written = 0_u64;
+    while let Some(chunk) = response.chunk().await.context("read export stream")? {
+        hasher.update(&chunk);
+        bytes_written += chunk.len() as u64;
+        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+            .await
+            .context("write export records")?;
+    }
+    tokio::io::AsyncWriteExt::flush(&mut file)
+        .await
+        .context("flush export records")?;
+    let records_digest = hex::encode(hasher.finalize());
+
+    // sha256sum(1) format, so an auditor can check it with the tool they have
+    // rather than one this project ships.
+    let sums = format!(
+        "{records_digest}  {record_file}\n{}  manifest.json\n{}  checkpoints.json\n",
+        hex::encode(Sha256::digest(&manifest_bytes)),
+        hex::encode(Sha256::digest(&checkpoint_bytes)),
+    );
+    tokio::fs::write(out.join("SHA256SUMS"), sums.as_bytes())
+        .await
+        .context("write SHA256SUMS")?;
+
+    if json {
+        print_value(
+            &serde_json::json!({
+                "directory": out.display().to_string(),
+                "export_id": manifest["export_id"],
+                "record_file": record_file,
+                "bytes": bytes_written,
+                "sha256": records_digest,
+                "checkpoints": manifest["checkpoints"]["status"],
+            }),
+            true,
+        )
+    } else {
+        println!("wrote audit export to {}", out.display());
+        println!(
+            "  export id   {}",
+            manifest["export_id"].as_str().unwrap_or("?")
+        );
+        println!(
+            "  exported by {}",
+            manifest["exported_by"].as_str().unwrap_or("?")
+        );
+        println!("  records     {record_file} ({bytes_written} bytes)");
+        println!("  sha256      {records_digest}");
+        if manifest["checkpoints"]["status"] == "unavailable" {
+            println!(
+                "\nNo checkpoint covers this range. SHA256SUMS shows this copy reached you\n\
+                 unaltered; it does not show the log was unedited before the copy was taken."
+            );
+        }
+        println!(
+            "\nCheck the copy with:\n  cd {} && sha256sum -c SHA256SUMS",
+            out.display()
+        );
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory;
@@ -1825,6 +2003,7 @@ mod tests {
                 Command::Policy { .. } => "policy",
                 Command::Webhook { .. } => "webhook",
                 Command::Audit(_) => "audit",
+                Command::AuditExport { .. } => "audit-export",
                 Command::Verify { .. } => "verify",
                 Command::Storage { .. } => "storage",
                 Command::Cluster { .. } => "cluster",

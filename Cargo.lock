@@ -2044,7 +2044,10 @@ name = "record-store-audit"
 version = "0.1.3"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
+ "futures-core",
+ "futures-util",
  "hex",
  "record-store-core",
  "redb 4.3.0",
@@ -2095,6 +2098,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "wiremock",
@@ -2436,6 +2440,7 @@ dependencies = [
  "record-store-events",
  "record-store-metadata",
  "record-store-storage",
+ "serde",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
