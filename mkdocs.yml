@@ -90,6 +90,7 @@ nav:
       - Installation: getting-started/installation.md
       - Quick Start: getting-started/quick-start.md
       - First Bucket and Object: getting-started/first-object.md
+      - Migrating from MinIO: getting-started/migrating-from-minio.md
   - Concepts:
       - concepts/index.md
       - Buckets and Objects: concepts/buckets-and-objects.md

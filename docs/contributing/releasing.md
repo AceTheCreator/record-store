@@ -20,12 +20,16 @@ flowchart TB
     server --> binaries[Binary archives from the published image]
     server --> smoke[Smoke test the published images]
     web --> smoke
-    binaries --> release[GitHub Release + checksums + SBOMs]
+    binaries --> provenance[Verify attestations]
+    server --> provenance
+    web --> provenance
+    provenance --> release[GitHub Release + checksums + SBOMs]
     smoke --> release
 ```
 
-The GitHub Release is created last and depends on everything before it, so a
-failed build never leaves a release behind. Images are pushed before the release
+The GitHub Release is created last and depends on everything before it —
+including the attestation gate — so a failed build never leaves a release behind,
+and neither does a build whose provenance is missing. Images are pushed before the release
 exists, but only after every gate has passed and both architectures have built.
 
 ## The procedure
@@ -125,6 +129,51 @@ git tag -v vX.Y.Z
 ```
 
 See [Verifying a Release](../deployment/verifying-releases.md).
+
+## Release checklist
+
+The workflow enforces most of this; the list exists so a human can see what is
+being enforced and why. **Items marked *enforced* fail the run — the release is
+not created.**
+
+Before tagging:
+
+- [ ] `CHANGELOG.md` has a section for this version, written for the person
+      upgrading, with no entries left under `## [Unreleased]`
+- [ ] The workspace version matches the tag — *enforced by the `validate` job*
+- [ ] `cargo fmt`, `clippy`, and the full test suite pass — *enforced by the `rust` job*
+- [ ] `bash tests/rust-audit.sh` is clean — no advisory, no yanked crate
+- [ ] `mkdocs build --strict` is clean
+- [ ] Any upgrade step a deployment must take is stated in the changelog, not
+      only in a pull request description
+
+Produced by the run, and all *enforced*:
+
+- [ ] Both images built for `linux/amd64` and `linux/arm64`
+- [ ] **Signed provenance on the server image index**
+- [ ] **Signed provenance on the console image index**
+- [ ] **An SPDX SBOM attested per architecture**, bound to the platform manifest it
+      describes rather than to the index
+- [ ] **Signed provenance on every binary archive**
+- [ ] The published images pass the smoke test
+- [ ] `SHA256SUMS` covers every asset actually attached
+
+The four attestation items are checked by
+[`.github/scripts/verify-attestations.sh`](https://github.com/OpenElementsLabs/record-store/blob/main/.github/scripts/verify-attestations.sh)
+in the `provenance` job, which the `release` job depends on. It queries the same
+public attestation service a user would, so a pass means
+`gh attestation verify` will also pass for whoever downloads the release.
+
+If it fails, the release is not published and the run says exactly which subject
+had no attestation. **Fix the attest step; do not skip the check.** A release
+that claims signed provenance and does not carry it is worse than one that
+claims nothing, because the claim is what people act on.
+
+After the run:
+
+- [ ] Verify the release the way a consumer would — see
+      [Verifying a Release](../deployment/verifying-releases.md)
+- [ ] The release notes render correctly and the asset list is complete
 
 ## Never repoint a version tag
 
