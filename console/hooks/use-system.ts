@@ -16,6 +16,10 @@ export const queryKeys = {
   storageUsage: ['storage', 'usage'] as const,
   storageStatus: ['storage', 'status'] as const,
   systemMetrics: ['system', 'metrics'] as const,
+  // A sibling of systemMetrics rather than a child: react-query matches keys by
+  // prefix, so nesting it would make every refetch of the counters also refetch
+  // the history it is only ever seeded from once.
+  systemMetricsHistory: ['system', 'metrics-history'] as const,
   buckets: ['buckets'] as const,
   bucket: (name: string) => ['buckets', name] as const,
   bucketLifecycle: (name: string) => ['buckets', name, 'lifecycle'] as const,

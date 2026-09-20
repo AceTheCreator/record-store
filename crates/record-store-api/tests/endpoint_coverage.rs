@@ -150,6 +150,9 @@ const CLASSIFIED: &[(&str, Audience)] = &[
     ("/api/v1/storage/usage", Audience::Console),
     ("/api/v1/system/info", Audience::Console),
     ("/api/v1/system/metrics", Audience::Console),
+    // Seeds the metrics screen's charts; same audience and same role gate as the
+    // reading it is a history of.
+    ("/api/v1/system/metrics/history", Audience::Console),
     ("/api/v1/verify/buckets/{}", Audience::ConsoleAndCli),
     ("/api/v1/verify/objects/{}/{}", Audience::ConsoleAndCli),
     ("/api/v1/webhook-deliveries", Audience::ConsoleAndCli),

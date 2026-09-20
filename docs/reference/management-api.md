@@ -51,6 +51,7 @@ The request ID is also in the `x-request-id` response header, and an inbound
 | --- | --- | --- |
 | `GET` | `/api/v1/system/info` | Version and capabilities |
 | `GET` | `/api/v1/system/metrics` | The same values `/metrics` exposes, as JSON |
+| `GET` | `/api/v1/system/metrics/history` | The last hour of counter readings, in memory, for charts |
 | `GET` | `/api/v1/auth/session` | The role behind the presented credential |
 
 ## Buckets

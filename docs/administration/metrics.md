@@ -137,6 +137,39 @@ curl https://management.example.com/api/v1/system/metrics \
 
 Use this when you want the numbers in a script and already hold a management token.
 
+## Recent readings
+
+Record Store exposes counters, not rates, so a rate only exists once two readings
+have been compared. The server takes its own reading every 15 seconds and keeps the
+last hour of them, which is what lets the console's charts draw immediately instead
+of standing there watching until it has seen enough:
+
+```bash
+curl https://management.example.com/api/v1/system/metrics/history \
+  -H "Authorization: Bearer <your-management-token>"
+```
+
+```json
+{
+  "interval_seconds": 15,
+  "capacity": 240,
+  "started_at": "2026-09-20T09:15:54Z",
+  "samples": [
+    { "at": "2026-09-20T09:15:54Z", "requests": 0, "errors": 0,
+      "upload_bytes": 0, "download_bytes": 0 }
+  ]
+}
+```
+
+Samples are counters, oldest first, exactly as a scraper would see them — differentiate
+consecutive readings to get a rate, and use each sample's own `at` rather than assuming
+`interval_seconds`, since real spacing varies.
+
+**This is held in memory and is not a record.** It exists to draw a graph, so it is
+bounded at one hour and starts again when the process restarts. `started_at` tells you
+when sampling began: a window shorter than an hour means the server restarted, not that
+traffic stopped. For history that outlives a restart, scrape `/metrics` into Prometheus.
+
 ## What is not here
 
 There are no per-bucket, per-operation, or per-status-code metrics, and no latency

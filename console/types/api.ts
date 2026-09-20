@@ -116,6 +116,32 @@ export type StorageStatus = {
  * authentication because the console never holds the scrape credential.
  * Counters are process-lifetime totals, not rates.
  */
+/** One counter reading taken by the server. */
+export type MetricsSample = {
+  /** RFC 3339 instant the reading was taken. */
+  readonly at: string;
+  readonly requests: number;
+  readonly errors: number;
+  readonly upload_bytes: number;
+  readonly download_bytes: number;
+};
+
+/**
+ * The server's own recent counter readings.
+ *
+ * The console seeds its observation window from these so a chart can be drawn
+ * on the first paint rather than after watching for a few minutes.
+ */
+export type MetricsHistory = {
+  /** Nominal seconds between readings; use each sample's `at` for real spacing. */
+  readonly interval_seconds: number;
+  readonly capacity: number;
+  /** When this server process started sampling. */
+  readonly started_at: string;
+  /** Samples, oldest first. */
+  readonly samples: readonly MetricsSample[];
+};
+
 export type SystemMetrics = {
   readonly requests: number;
   readonly errors: number;
