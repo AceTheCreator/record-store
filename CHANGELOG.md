@@ -11,6 +11,47 @@ publishes, so keep it factual and written for the people upgrading.
 
 ### Added
 
+- **The audit Merkle tree binds its own size, and the root has its own domain.**
+  Two changes to the checkpoint and tree layer, made before anything writes a
+  checkpoint to disk, because changing a hash preimage after signed checkpoints
+  exist costs a format version and a migration.
+
+  A checkpoint now carries `leaf_count`, and it is inside the checkpoint hash
+  preimage — fixed-width big-endian, in a defined position — and inside the signed
+  bytes of a proof bundle. Path verification takes the leaf count as a required
+  argument and **rejects** a path whose length is not the one that leaf index in a
+  tree of that size must produce. Odd nodes are promoted rather than duplicated,
+  which is the right choice, but it makes path length vary by leaf position: a
+  verifier that does not know the leaf count cannot tell a legitimate path from one
+  built against a tree of a different size. A checkpoint whose `leaf_count`
+  disagrees with the range it claims is reported as a failure — that disagreement is
+  what a record dropped from the tree looks like from outside, and every proof for
+  the records that remain still folds to the published root.
+
+  The root is now hashed under a third domain prefix (`0x02`), distinct from the
+  leaf (`0x00`) and node (`0x01`) prefixes and applied once at the top, including
+  for a single-leaf tree. Without it a one-record tree roots at its own leaf, so any
+  record hash could be presented as a root that an empty inclusion path verifies
+  against. **A tree over zero leaves has no root and a checkpoint covering no
+  records is never written**; one is refused at construction rather than left to
+  whatever falls out.
+
+  Known-answer vectors for trees of 1, 2, 3, 5, 8 and 9 leaves are committed as data
+  files under `crates/record-store-audit/tests/vectors/merkle/`, computed by a
+  separate implementation of the written rules rather than printed from the encoder,
+  so an independent verifier can reproduce them from the specification alone.
+
+  Documentation: [Audit Chain and Checkpoints](docs/reference/audit-chain.md), which
+  specifies the three prefixes and where each applies, the promotion rule, the root
+  rule including the single-leaf and zero-leaf cases, the checkpoint preimage field
+  order with widths and endianness, and the inclusion-path encoding including the
+  direction bit per step.
+
+  The proof bundle format gains `checkpoint.leaf_count` in the JSON and in the
+  canonical encoding signatures cover. No format version bump: the history and
+  checkpoint sections have never been emitted as anything but `unavailable`, so no
+  bundle in existence carries a checkpoint.
+
 - **Auditor-facing audit export.** `record-store audit-export export --from <ts>
   --to <ts> --format json|csv --out <dir>` writes a directory holding the records, a
   manifest, the covering checkpoint roots, and a `SHA256SUMS` over all three. Records

@@ -114,7 +114,8 @@ human-readable `detail`. Reasons:
       "inclusion_path": { "index": 0, "steps": [ { "side": "right", "hash": "hex" } ] } }
   ],
   "checkpoint": { "sequence": 7, "from_sequence": 100, "to_sequence": 140,
-                  "root": "hex", "previous_checkpoint_hash": "hex" },
+                  "leaf_count": 41, "root": "hex",
+                  "previous_checkpoint_hash": "hex" },
   "anchor": { "kind": "rfc3161", "receipt": "base64", "asserted_at": "RFC 3339" }
 }
 ```
@@ -123,6 +124,23 @@ A bundle carries only the records touching one object version, so it holds a
 subset of the log. Consecutive entries are expected to link only when their
 sequence numbers are adjacent; a verifier must not claim to have checked the
 chain across a gap, because the records in between are not present.
+
+The **checkpoint**, by contrast, describes the whole range, not the excerpt:
+
+| Field | Meaning |
+| --- | --- |
+| `sequence` | Position in the checkpoint chain |
+| `from_sequence`, `to_sequence` | The range covered, inclusive at both ends |
+| `leaf_count` | How many leaves the Merkle tree was built from |
+| `root` | Merkle root over those leaves |
+| `previous_checkpoint_hash` | The preceding checkpoint's hash |
+
+`leaf_count` must equal `to_sequence - from_sequence + 1`, and a verifier must
+report a disagreement as a failure. The two disagreeing is what a record
+dropped from the tree looks like from outside: every proof for the records that
+remain still folds to the published root, and only the count says one is
+missing. `inclusion_path.index` is a position in that full range —
+`sequence - from_sequence` — not a position in the excerpt the bundle carries.
 
 ### `deployment` and `signature`
 
@@ -179,6 +197,7 @@ bytes       hash                   32 bytes, length-prefixed
 u64     checkpoint.sequence
 u64     checkpoint.from_sequence
 u64     checkpoint.to_sequence
+u64     checkpoint.leaf_count
 str     checkpoint.root
 str     checkpoint.previous_checkpoint_hash
 u8      anchor present             0x00 absent, 0x01 present
@@ -208,31 +227,63 @@ The signature is Ed25519 over these bytes, as specified in RFC 8032.
 
 ## Merkle construction
 
-Needed only to check a `present` history. All hashes are SHA-256 over the
-domain string `record-store/audit-merkle/v1` followed by a prefix byte:
+Needed only to check a `present` history. Specified in full, with known-answer
+vectors, in [Audit Chain and Checkpoints](audit-chain.md); repeated here in the
+form a bundle verifier needs.
+
+All hashes are SHA-256 over the domain string `record-store/audit-merkle/v1`
+followed by exactly one prefix byte:
 
 ```text
 leaf(record_hash) = SHA-256( "record-store/audit-merkle/v1" ‖ 0x00 ‖ record_hash )
 node(left, right) = SHA-256( "record-store/audit-merkle/v1" ‖ 0x01 ‖ left ‖ right )
+root(apex)        = SHA-256( "record-store/audit-merkle/v1" ‖ 0x02 ‖ apex )
 ```
 
-Leaves and interior nodes use different prefixes so an interior node can never
-be presented as a record.
+`0x00` is applied once per record, `0x01` once per pair at every level, and
+`0x02` exactly once, to the single node left at the top. The three are distinct
+so that none can be presented as another — without `0x02`, a one-record tree
+would root at its own leaf, and any record hash could be offered as a root that
+an empty path verifies against.
 
 The tree is built from the leaves of every record the checkpoint covers, in
 sequence order. At each level, nodes are paired left to right. **An odd node at
 any level is promoted to the next level unchanged, not duplicated** — hashing it
 with itself would make a three-record range produce the same root as a
-four-record range whose last entry repeats.
+four-record range whose last entry repeats. The root is `root(apex)`, where the
+apex is the node left over. A tree over zero leaves has no root, and a
+checkpoint whose `leaf_count` is zero must be rejected.
 
-To check an inclusion path, start from `leaf(record_hash)` and fold each step:
+To check an inclusion path, in this order:
 
-```text
-side = left   →  current = node(step.hash, current)
-side = right  →  current = node(current, step.hash)
-```
+1. Reject if `inclusion_path.index >= checkpoint.leaf_count`.
+2. Compute the length that index must produce in a tree of `leaf_count` leaves,
+   and **reject if `steps` is not exactly that long**:
 
-The result must equal `checkpoint.root`.
+    ```text
+    n, p, steps = leaf_count, index, 0
+    while n > 1:
+        if not ((p == n - 1) and (n is odd)): steps += 1
+        p = p // 2
+        n = ceil(n / 2)
+    ```
+
+3. Fold, starting from `leaf(record_hash)`:
+
+    ```text
+    side = left   →  current = node(step.hash, current)
+    side = right  →  current = node(current, step.hash)
+    ```
+
+4. `root(current)` must equal `checkpoint.root`.
+
+Step 2 is not optional. Promotion makes path length depend on position, so a
+path built against a tree of a different size can be the length a plausible
+tree would produce — index 4 takes three steps in both a seven-leaf and an
+eight-leaf tree, but one step in a five-leaf tree. Folding whatever arrives and
+comparing the result means comparing a digest with no established provenance.
+The check is worth something only because `leaf_count` is inside the signed
+bytes above.
 
 ## Verification procedure
 
@@ -247,9 +298,12 @@ The result must equal `checkpoint.root`.
 5. Stream the object file through SHA-256 and compare with `payload.sha256`.
    The payload must never be loaded into memory whole; a bundle has to work for
    objects larger than the machine checking them.
-6. If `history.status` is `present`, check every record's inclusion path against
-   `checkpoint.root`, and check that records with adjacent sequence numbers
-   link (`later.previous_hash == earlier.record_hash`).
+6. If `history.status` is `present`, check that `checkpoint.leaf_count` equals
+   `to_sequence - from_sequence + 1`; check every record's inclusion path
+   against `checkpoint.root` **at that leaf count**, rejecting any path whose
+   length is not the one its index must produce; and check that records with
+   adjacent sequence numbers link
+   (`later.previous_hash == earlier.record_hash`).
 7. Report every check and its status. A check that could not be performed is
    reported as **not proved**, never omitted and never counted as a pass.
 

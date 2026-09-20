@@ -338,6 +338,7 @@ fn verify_history(bundle: &ProofBundle) -> Vec<Check> {
             anchor,
         } => {
             let mut checks = Vec::new();
+            checks.push(verify_checkpoint_size(checkpoint));
             checks.push(verify_inclusion(records, checkpoint));
             checks.push(verify_links(records));
             checks.push(match anchor {
@@ -360,6 +361,51 @@ fn verify_history(bundle: &ProofBundle) -> Vec<Check> {
     }
 }
 
+/// Checks that the checkpoint's leaf count agrees with the range it claims.
+///
+/// A checkpoint over `from..=to` was built from exactly that many records. The
+/// two disagreeing is what a record quietly dropped from the tree looks like
+/// from outside, and every proof for the records that remain would still fold
+/// to the published root. So the disagreement is the finding.
+fn verify_checkpoint_size(checkpoint: &crate::bundle::Checkpoint) -> Check {
+    if checkpoint.to_sequence < checkpoint.from_sequence {
+        return Check::failed(
+            "checkpoint range",
+            format!(
+                "checkpoint {} claims to cover sequences {}..={}, which is not a range",
+                checkpoint.sequence, checkpoint.from_sequence, checkpoint.to_sequence
+            ),
+        );
+    }
+    let covered = checkpoint.to_sequence - checkpoint.from_sequence + 1;
+    if covered == checkpoint.leaf_count {
+        Check::passed(
+            "checkpoint range",
+            format!(
+                "checkpoint {} covers sequences {}..={}, which is the {} records its \
+                 Merkle tree was built from",
+                checkpoint.sequence,
+                checkpoint.from_sequence,
+                checkpoint.to_sequence,
+                checkpoint.leaf_count
+            ),
+        )
+    } else {
+        Check::failed(
+            "checkpoint range",
+            format!(
+                "checkpoint {} claims sequences {}..={}, which is {covered} records, but its \
+                 Merkle tree was built from {}. Records covered by this checkpoint are \
+                 missing from the tree that commits to them.",
+                checkpoint.sequence,
+                checkpoint.from_sequence,
+                checkpoint.to_sequence,
+                checkpoint.leaf_count
+            ),
+        )
+    }
+}
+
 /// Recomputes each record's path up to the checkpoint root.
 fn verify_inclusion(
     records: &[crate::bundle::HistoryRecord],
@@ -375,7 +421,28 @@ fn verify_inclusion(
                 format!("record {} has a malformed hash", record.sequence),
             );
         };
-        if !merkle::verify_inclusion(&record_hash, &record.inclusion_path, &root) {
+        // The leaf count comes from the checkpoint rather than from the path,
+        // and the signature covers it. A path that is not the length that
+        // index in a tree of that size must produce is rejected before its
+        // digests are compared with anything: folding it would still yield
+        // some root, and comparing that would be comparing a number there is
+        // no reason to trust.
+        let Some(computed) =
+            merkle::root_from_path(&record_hash, &record.inclusion_path, checkpoint.leaf_count)
+        else {
+            return Check::failed(
+                "audit inclusion",
+                format!(
+                    "record {} carries an inclusion path of {} step(s), which is not the path \
+                     index {} takes in a tree of {} leaves",
+                    record.sequence,
+                    record.inclusion_path.steps.len(),
+                    record.inclusion_path.index,
+                    checkpoint.leaf_count
+                ),
+            );
+        };
+        if computed != root {
             return Check::failed(
                 "audit inclusion",
                 format!(
@@ -388,11 +455,13 @@ fn verify_inclusion(
     Check::passed(
         "audit inclusion",
         format!(
-            "all {} records sit under checkpoint {} covering sequences {}..={}",
+            "all {} records sit under checkpoint {} covering sequences {}..={} \
+             ({} leaves)",
             records.len(),
             checkpoint.sequence,
             checkpoint.from_sequence,
-            checkpoint.to_sequence
+            checkpoint.to_sequence,
+            checkpoint.leaf_count
         ),
     )
 }

@@ -13,6 +13,7 @@
 //! than reporting a green tick, because a verdict that overstates what it
 //! checked is worse than no verdict.
 
+pub mod anchor;
 pub mod bundle;
 pub mod signing;
 pub mod verify;

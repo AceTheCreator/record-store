@@ -145,6 +145,15 @@ pub struct Checkpoint {
     pub from_sequence: u64,
     /// Last audit sequence the checkpoint covers.
     pub to_sequence: u64,
+    /// How many leaves the Merkle tree was built from.
+    ///
+    /// Not decoration and not derivable from the range by a verifier that is
+    /// entitled to distrust it. The tree promotes odd nodes rather than
+    /// duplicating them, so path length varies by leaf position; without a
+    /// count that the signature covers, a path of the wrong length for a tree
+    /// of a different size cannot be told from a legitimate one. It is inside
+    /// the signed bytes below for exactly that reason.
+    pub leaf_count: u64,
     /// Merkle root over every covered record.
     pub root: String,
     /// Hash of the preceding checkpoint.
@@ -273,6 +282,7 @@ impl ProofBundle {
                 out.extend_from_slice(&checkpoint.sequence.to_be_bytes());
                 out.extend_from_slice(&checkpoint.from_sequence.to_be_bytes());
                 out.extend_from_slice(&checkpoint.to_sequence.to_be_bytes());
+                out.extend_from_slice(&checkpoint.leaf_count.to_be_bytes());
                 put_str(&mut out, &checkpoint.root);
                 put_str(&mut out, &checkpoint.previous_checkpoint_hash);
                 match anchor {
