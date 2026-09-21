@@ -63,6 +63,25 @@ rebuild of this one.
 
 ## Verification
 
+Every image and every binary archive carries signed build provenance, naming the
+workflow, the repository and the commit that produced it. The release refuses to
+publish if any of it is missing.
+
+\`\`\`bash
+gh attestation verify oci://$SERVER_IMAGE@$SERVER_DIGEST --repo $REPOSITORY
+gh attestation verify record-store-$VERSION-linux-amd64.tar.gz --repo $REPOSITORY
+\`\`\`
+
+The same provenance is attached here as \`record-store-$VERSION-provenance.intoto.jsonl\`,
+so it can be kept alongside the bytes and checked without asking GitHub about a
+file GitHub is also hosting:
+
+\`\`\`bash
+gh attestation verify record-store-$VERSION-linux-amd64.tar.gz \\
+  --bundle record-store-$VERSION-provenance.intoto.jsonl \\
+  --repo $REPOSITORY
+\`\`\`
+
 Confirm the image reports the version it is tagged with:
 
 \`\`\`bash
@@ -93,11 +112,10 @@ cat <<NOTES
 
 Linux binary archives contain \`record-store\` and \`record-store-server\`, taken from
 the published images so the archive and the container hold the same build. An
-SPDX SBOM is attached per image and per architecture.
+SPDX SBOM is attached per image and per architecture, the SLSA provenance for the
+archives is attached as \`.intoto.jsonl\`, and \`SHA256SUMS\` covers every asset here.
 
-Images are published unsigned: GitHub's artifact attestation service is not
-available to this repository, so there is no \`gh attestation verify\` to run. The
-release tag is signed, and \`SHA256SUMS\` covers every asset here. See
+The release tag is signed too. See
 [Verifying a Release](https://openelementslabs.github.io/record-store/deployment/verifying-releases/).
 
 macOS builds are not published; build from source with \`cargo build --release\`.

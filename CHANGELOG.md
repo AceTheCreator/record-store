@@ -11,6 +11,28 @@ publishes, so keep it factual and written for the people upgrading.
 
 ### Added
 
+- **Releases ship their provenance as an asset, not only as an API record.**
+  The build already produced SLSA provenance for every binary archive, but it
+  existed only in GitHub's attestation service. A downloader could verify with
+  `gh attestation verify` while online, and had nothing to keep: no file to
+  archive next to the bytes, nothing checkable in an air-gapped environment or
+  after this repository is gone, and nothing on the release page for a supply
+  chain scanner to find.
+
+  The same bundle is now attached to the release as
+  `record-store-<version>-provenance.intoto.jsonl`, covering every archive, and
+  verified against a downloaded copy with
+  `gh attestation verify <archive> --bundle <bundle> --repo <repo>`.
+
+  The release refuses to publish unless that bundle decodes and names every
+  archive by digest — a separate check from the service lookup, because "the
+  service has provenance" and "the release ships provenance" are different
+  claims and only the second one survives being archived.
+
+  **`0.1.3` and earlier have no provenance and never will.** Attestation was
+  turned on after `0.1.3` was cut, and generating provenance now for a build
+  nobody observed then would be manufacturing evidence.
+
 - **The audit Merkle tree binds its own size, and the root has its own domain.**
   Two changes to the checkpoint and tree layer, made before anything writes a
   checkpoint to disk, because changing a hash preimage after signed checkpoints
