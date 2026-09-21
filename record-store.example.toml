@@ -2,6 +2,13 @@
 s3_bind = "0.0.0.0:7600"
 api_bind = "0.0.0.0:7601"
 shutdown_grace_period_seconds = 30
+# Reverse-proxy hops whose X-Forwarded-For header may be believed. Empty means
+# the header is ignored and every request is attributed to the socket it
+# arrived on, which is safe everywhere and coarse behind a proxy: until the
+# proxy is named here, every visitor through it shares one identity for rate
+# limiting and appears in the audit trail as the proxy's address.
+# Name only hops you actually run.
+# trusted_proxies = ["10.0.0.0/8"]
 
 [storage]
 data_directory = "./data"

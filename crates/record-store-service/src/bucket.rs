@@ -7,12 +7,10 @@ use record_store_core::{
     Bucket, BucketId, BucketName, BucketQuota, CorsConfiguration, ObjectLockConfiguration,
     OrganizationId, VersioningState,
 };
-use record_store_events::{EventRepository, StorageEvent, StorageEventType};
 use record_store_metadata::MetadataRepository;
 use tokio::sync::Semaphore;
 
 use crate::error::map_metadata;
-use crate::events::publish_event;
 use crate::services::BucketCoordinator;
 use crate::*;
 
@@ -23,7 +21,6 @@ pub struct BucketService {
     pub(crate) operations: Arc<Semaphore>,
     pub(crate) metrics: Arc<ServiceMetrics>,
     pub(crate) owner: OrganizationId,
-    pub(crate) events: Option<Arc<dyn EventRepository>>,
 }
 
 impl BucketService {
@@ -80,11 +77,6 @@ impl BucketService {
             .create_bucket(&bucket)
             .await
             .map_err(map_metadata)?;
-        publish_event(
-            &self.events,
-            StorageEvent::new(StorageEventType::BucketCreated, bucket.name.as_str()),
-        )
-        .await;
         Ok(bucket)
     }
 
@@ -178,11 +170,6 @@ impl BucketService {
             .delete_bucket(name)
             .await
             .map_err(map_metadata)?;
-        publish_event(
-            &self.events,
-            StorageEvent::new(StorageEventType::BucketDeleted, name.as_str()),
-        )
-        .await;
         Ok(())
     }
 

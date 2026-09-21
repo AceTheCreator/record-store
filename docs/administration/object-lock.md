@@ -173,15 +173,24 @@ application that needs the first rarely needs the second.
 Presenting the header without the permission is refused before the request reaches any
 handler, so an unauthorized caller never gets as far as the object.
 
-**Every bypass writes an audit record**, whether or not the operation that used it went
-on to succeed — an attempted override is exactly as interesting as a successful one:
+**Every bypass writes audit records** — two of them, and *before* the version can be
+gone. The first is written with `result: attempted` before the operation runs; the
+second records what it did, whether or not it succeeded. An attempted override is
+exactly as interesting as a successful one, and writing only afterwards would lose the
+record to the crash that makes it matter most.
 
 ```bash
 record-store audit --limit 100 | grep object-lock.bypass
 ```
 
-The record names the principal, the bucket, the key, and the version id. It contains no
-credential.
+Each record names the principal, the bucket, the key, and the version id. It contains
+no credential.
+
+!!! warning "A bypass that cannot be recorded is refused"
+    If the record cannot be made durable — a full disk, a corrupt audit database, or
+    a deployment running with no durable audit trail at all — the operation is refused
+    and the version stays. A retained version leaving with nothing to show for it is
+    the one outcome the bypass permission exists to prevent.
 
 ## Interaction with lifecycle rules
 

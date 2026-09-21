@@ -30,7 +30,7 @@ use record_store_consensus::{
 };
 use record_store_core::{
     Bucket, BucketId, BucketName, BucketQuota, Checksum, ClusterId, NodeId, ObjectId, ObjectKey,
-    OrganizationId, PayloadFormat, VersioningState,
+    OrganizationId, PayloadFormat, VersioningState, WriteOrigin,
 };
 use record_store_metadata::MetadataRepository;
 use record_store_replication::{
@@ -568,6 +568,7 @@ impl Harness {
                 object_id: None,
                 protocol_etag: None,
                 object_lock: None,
+                origin: WriteOrigin::Direct,
                 body: upload_stream(futures_util::stream::once(async move { Ok(chunk) })),
             })
             .await

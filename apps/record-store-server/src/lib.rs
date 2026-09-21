@@ -20,14 +20,14 @@ use record_store_audit::{AuditError, AuditRepository, RedbAuditRepository};
 use record_store_auth::{
     Authorizer, CredentialManager, CredentialStoreError, SigningCredentialProvider,
 };
-use record_store_config::Config;
+use record_store_config::{Config, ConfigError};
 use record_store_core::OrganizationId;
 use record_store_events::{
     EventError, EventRepository, RedbEventRepository, WebhookConfig, WebhookWorker,
 };
 use record_store_lifecycle::{LifecycleError, LifecycleWorker};
 use record_store_metadata::{MetadataError, MetadataRepository, RedbMetadataRepository};
-use record_store_service::{ObjectLockLimits, ServiceLimits, Services};
+use record_store_service::{ObjectLockLimits, ServiceLimits, Services, StorageEventPump};
 use record_store_sharing::{CapabilityStore, SharingPolicy, SharingService, TicketIssuer};
 use record_store_storage::{LocalFilesystemStore, ObjectStore, StorageError};
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,7 @@ pub struct ServerRuntime {
     s3: axum::Router,
     shutdown_grace_period: Duration,
     webhook_worker: WebhookWorker,
+    event_pump: StorageEventPump,
     lifecycle_worker: LifecycleWorker,
     process_lock: File,
     cleanup_storage: Arc<dyn ObjectStore>,
@@ -75,6 +76,7 @@ impl ServerRuntime {
         let s3_shutdown = cancellation.clone().cancelled_owned();
         let api_shutdown = cancellation.clone().cancelled_owned();
         let webhook_shutdown = cancellation.clone();
+        let event_pump_shutdown = cancellation.clone();
         let lifecycle_shutdown = cancellation;
         let cleanup_shutdown = lifecycle_shutdown.clone();
         let cluster_shutdown = lifecycle_shutdown.clone();
@@ -106,6 +108,13 @@ impl ServerRuntime {
                     .run(webhook_shutdown)
                     .await
                     .map_err(StartupError::Events)
+            },
+            async {
+                // Drains what committed mutations already made durable, so a
+                // restart resumes delivery rather than starting from whatever
+                // happens next.
+                self.event_pump.run(event_pump_shutdown).await;
+                Ok::<(), StartupError>(())
             },
             async {
                 self.lifecycle_worker
@@ -293,9 +302,29 @@ pub async fn initialize(config: &Config) -> Result<ServerRuntime, StartupError> 
                     .clock_backwards_tolerance_seconds,
             },
         },
-        Some(Arc::clone(&event_dependency)),
         Arc::clone(&audit_dependency),
     );
+    // Storage events are journalled by the catalog inside the transaction that
+    // commits each mutation. The pump is what moves them into the delivery
+    // outbox; without it the journal simply grows and nothing is delivered, so
+    // it is part of the runtime rather than an optional extra.
+    let mut event_pump = StorageEventPump::new(
+        Arc::clone(&metadata_dependency),
+        Arc::clone(&event_dependency),
+        // A second, not the webhook poll interval: the pump is what makes an
+        // event visible at all, so the delay before it runs is the delay
+        // before anything — the console feed included — can see the event. A
+        // pass over an empty journal is one local range read.
+        Duration::from_secs(1),
+    );
+    if let Some(dependencies) = &cluster_dependencies {
+        // Every member holds the same journal, so draining from more than one
+        // would publish each event into several node-local outboxes and
+        // deliver it several times. The gate keeps that to one member.
+        event_pump = event_pump.with_activation_gate(Arc::new(cluster::LeaderEventPumpGate::new(
+            Arc::clone(&dependencies.consensus),
+        )));
+    }
     let lifecycle_worker = LifecycleWorker::open(
         config
             .storage
@@ -345,6 +374,12 @@ pub async fn initialize(config: &Config) -> Result<ServerRuntime, StartupError> 
         },
         TicketIssuer::derive(sharing_key_material.as_bytes())?,
     ));
+    // Parsed once, here, so a malformed entry stops start-up rather than
+    // quietly reverting the deployment to socket-address attribution.
+    let trusted_proxies = config
+        .server
+        .parsed_trusted_proxies()
+        .map_err(|error| StartupError::Configuration(ConfigError::Validation(error.to_string())))?;
     // One ring, shared: the sampler writes it and the endpoint reads it.
     let metrics_history = Arc::new(record_store_api::history::MetricsHistory::new(Utc::now()));
     let mut management_state = AppState::new(
@@ -357,6 +392,7 @@ pub async fn initialize(config: &Config) -> Result<ServerRuntime, StartupError> 
         env!("CARGO_PKG_VERSION"),
     )
     .with_mode(config.server.mode)
+    .with_trusted_proxies(trusted_proxies.clone())
     .with_metrics_history(Arc::clone(&metrics_history))
     .with_events(Arc::clone(&event_dependency))
     .with_sharing(SharingManagement::new(
@@ -430,6 +466,7 @@ pub async fn initialize(config: &Config) -> Result<ServerRuntime, StartupError> 
         record_store_s3::S3State::new(services.clone(), credential_provider)
             .with_authorizer(authorizer)
             .with_audit(audit_dependency)
+            .with_trusted_proxies(trusted_proxies)
             .with_root_s3_enabled(config.auth.root_s3_enabled)
             .with_maximum_header_bytes(config.limits.maximum_header_bytes),
     )
@@ -447,6 +484,7 @@ pub async fn initialize(config: &Config) -> Result<ServerRuntime, StartupError> 
             event_dependency,
             Duration::from_secs(config.webhooks.poll_interval_seconds),
         ),
+        event_pump,
         lifecycle_worker,
         process_lock,
         cleanup_storage,

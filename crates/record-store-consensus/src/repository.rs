@@ -16,9 +16,10 @@ use record_store_cluster::{
 };
 use record_store_core::{
     Bucket, BucketId, BucketName, BucketQuota, ClusterOperationId, CorsConfiguration, JoinTokenId,
-    LifecycleRule, LifecycleRuleId, MultipartUpload, NodeCredentialId, NodeId, ObjectId, ObjectKey,
-    ObjectLockConfiguration, ObjectLockState, ObjectMetadata, ObjectVersionRecord, PartNumber,
-    ReplicaTaskId, StorageUsage, UploadId, UploadedPart, VersionId, VersioningState,
+    LifecycleRule, LifecycleRuleId, MultipartUpload, MutationEvent, NodeCredentialId, NodeId,
+    ObjectId, ObjectKey, ObjectLockConfiguration, ObjectLockState, ObjectMetadata,
+    ObjectVersionRecord, PartNumber, ReplicaTaskId, StorageUsage, UploadId, UploadedPart,
+    VersionId, VersioningState, WriteOrigin,
 };
 use record_store_metadata::{
     DeleteObjectResult, DeleteVersionResult, ListMultipartUploadsRequest,
@@ -163,13 +164,40 @@ impl MetadataRepository for ReplicatedMetadataRepository {
         &self,
         metadata: &ObjectMetadata,
         object_lock: Option<ObjectLockState>,
+        origin: WriteOrigin,
     ) -> Result<ObjectCommitResult, MetadataError> {
         self.propose(MetadataCommand::PutObject {
             metadata: Box::new(metadata.clone()),
             object_lock,
+            origin,
         })
         .await?
         .into_object_commit()
+    }
+
+    /// Reads this member's own copy of the journal.
+    ///
+    /// The journal is part of the replicated state, so every member holds the
+    /// same rows. Reading locally is therefore not a weaker answer, and it is
+    /// what lets a member drain without a round trip. Which member *may* drain
+    /// is a separate question, settled by the activation gate rather than here.
+    async fn pending_mutation_events(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<MutationEvent>, MetadataError> {
+        self.local.pending_mutation_events(after, limit).await
+    }
+
+    /// Prunes through consensus, so every member's journal is pruned alike.
+    ///
+    /// Pruning locally would leave the other members holding rows forever, and
+    /// would mean a member taking over the drain after a leadership change saw
+    /// a journal that disagreed with the one the previous drainer worked from.
+    async fn prune_mutation_events(&self, through_sequence: u64) -> Result<(), MetadataError> {
+        self.propose(MetadataCommand::PruneMutationEvents { through_sequence })
+            .await
+            .map(|_| ())
     }
 
     async fn get_object(
@@ -1057,7 +1085,10 @@ mod tests {
             created_at: Utc::now(),
             modified_at: Utc::now(),
         };
-        repository.put_object(&metadata, None).await.expect("put");
+        repository
+            .put_object(&metadata, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
 
         assert_eq!(
             repository
@@ -1268,8 +1299,14 @@ mod tests {
         let key = ObjectKey::new("note.txt").expect("key");
         let first = metadata_for(record.id, "note.txt", 3);
         let second = metadata_for(record.id, "note.txt", 5);
-        repository.put_object(&first, None).await.expect("put");
-        repository.put_object(&second, None).await.expect("put");
+        repository
+            .put_object(&first, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
+        repository
+            .put_object(&second, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
 
         assert!(
             repository
@@ -1450,7 +1487,10 @@ mod tests {
             .expect("delete rule");
 
         let stored = metadata_for(record.id, "logs/a", 16);
-        repository.put_object(&stored, None).await.expect("put");
+        repository
+            .put_object(&stored, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
         assert!(
             repository
                 .payload_referenced(stored.id)
@@ -1500,7 +1540,10 @@ mod tests {
         let record = bucket("occupied");
         repository.create_bucket(&record).await.expect("create");
         let stored = metadata_for(record.id, "a.txt", 1);
-        repository.put_object(&stored, None).await.expect("put");
+        repository
+            .put_object(&stored, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
 
         assert!(matches!(
             repository.delete_bucket(&record.name).await,

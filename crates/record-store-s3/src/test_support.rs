@@ -33,8 +33,30 @@ use crate::{S3State, router};
 pub(crate) const TEST_ACCESS_KEY: &str = "root-test-access";
 pub(crate) const TEST_SECRET_KEY: &str = "root-test-secret-at-least-sixteen";
 
+/// Builds the S3 surface the way a deployment runs it: with a durable audit
+/// trail. Operations that must leave evidence — a governance bypass above all
+/// — are refused without one, so a fixture that omitted it would be testing a
+/// configuration nothing ships.
 pub(crate) async fn test_router() -> (TempDir, Router, Arc<CredentialManager>) {
+    let (directory, state, credentials) = test_state().await;
+    (directory, router(state), credentials)
+}
+
+/// Builds the S3 surface over a durable audit trail, real or fault-injected.
+pub(crate) async fn test_router_with_audit(
+    audit: Arc<dyn record_store_audit::AuditRepository>,
+) -> (TempDir, Router, Arc<CredentialManager>) {
+    let (directory, state, credentials) = test_state().await;
+    (directory, router(state.with_audit(audit)), credentials)
+}
+
+async fn test_state() -> (TempDir, S3State, Arc<CredentialManager>) {
     let directory = tempdir().expect("temporary directory");
+    let audit: Arc<dyn record_store_audit::AuditRepository> = Arc::new(
+        record_store_audit::RedbAuditRepository::open(directory.path().join("audit.redb"))
+            .await
+            .expect("audit repository"),
+    );
     let metadata_impl = Arc::new(
         RedbMetadataRepository::open(directory.path().join("metadata.redb"))
             .await
@@ -51,7 +73,7 @@ pub(crate) async fn test_router() -> (TempDir, Router, Arc<CredentialManager>) {
         .expect("filesystem store"),
     );
     let storage: Arc<dyn ObjectStore> = storage_impl;
-    let services = Services::new(
+    let services = Services::new_with_audit(
         storage,
         metadata,
         OrganizationId::new(),
@@ -61,6 +83,7 @@ pub(crate) async fn test_router() -> (TempDir, Router, Arc<CredentialManager>) {
             maximum_custom_metadata_bytes: 1_024,
             object_lock: ObjectLockLimits::default(),
         },
+        Arc::clone(&audit),
     );
     let credentials = Arc::new(
         CredentialManager::open(
@@ -76,7 +99,9 @@ pub(crate) async fn test_router() -> (TempDir, Router, Arc<CredentialManager>) {
     let authorizer: Arc<dyn Authorizer> = credentials.clone();
     (
         directory,
-        router(S3State::new(services, provider).with_authorizer(authorizer)),
+        S3State::new(services, provider)
+            .with_authorizer(authorizer)
+            .with_audit(audit),
         credentials,
     )
 }

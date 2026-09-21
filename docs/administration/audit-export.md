@@ -44,21 +44,25 @@ cd audit-2026-01 && sha256sum -c SHA256SUMS
 **`SHA256SUMS` establishes that the copy reached you unaltered.** It is computed
 by the client as the bytes arrive, so it covers the transfer.
 
-**It does not establish that the log was not edited before the copy was taken.**
-An export is a copy of what the server says the trail contains. Only a checkpoint
-covering the range — and, beyond that, an external anchor over that checkpoint —
-turns a copy into evidence about the past.
+**It does not on its own establish that the log was not edited before the copy was
+taken.** An export is a copy of what the server says the trail contains. Two further
+things carry that argument, and they reach different distances:
 
-`checkpoints.json` states which of the two you have:
+- the **hash chain**, which the server maintains and which you can recheck with
+  `record-store audit-export verify-chain`. It detects a record edited, removed, or
+  reordered by anyone who could not also rewrite every later link.
+- a **checkpoint**, and beyond it an **external anchor** over that checkpoint, which
+  is what reaches an operator who rewrote the whole log and every hash in it. This
+  release does not produce either.
+
+`checkpoints.json` states which of these you have:
 
 ```json
 {
   "status": "unavailable",
-  "reason": "chain_not_enabled",
-  "detail": "this deployment does not maintain a tamper-evident audit chain, so no
-             checkpoint covers this range. The SHA256SUMS file establishes that this
-             copy reached you unaltered; it does not establish that the log was not
-             edited before the copy was taken."
+  "reason": "not_yet_checkpointed",
+  "detail": "this deployment maintains a hash-chained audit log but does not yet
+             produce checkpoints, so no Merkle root covers this range. …"
 }
 ```
 
@@ -66,10 +70,12 @@ That file is always written. A missing section would read as "nothing to
 report"; an explicit `unavailable` reads as "this was not established", and the
 two are different claims.
 
-!!! note "Checkpoints are not implemented yet"
-    Every export from this release reports `chain_not_enabled`. The field exists
+!!! note "Checkpoints and anchoring are not implemented yet"
+    Every export from this release reports `not_yet_checkpointed`. The field exists
     so exports taken now stay readable by tooling built later, and so nobody
-    mistakes an unanchored copy for an anchored one.
+    mistakes an unanchored copy for an anchored one. The chain underneath it is
+    real; see
+    [Audit Log](audit-log.md#checking-the-log-has-not-been-edited).
 
 ## Formats
 

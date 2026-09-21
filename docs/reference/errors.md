@@ -70,8 +70,8 @@ The request ID is also in `x-amz-request-id`.
 | `412` | `PreconditionFailed` | An `If-Match` or `If-Unmodified-Since` condition failed |
 | `416` | `InvalidRange` | The requested range starts at or past the end of the object |
 | `501` | `NotImplemented` | An [unsupported operation](s3-compatibility.md#unsupported) |
-| `503` | `ServiceUnavailable` | The server is not ready, or the clock is behind the recorded [Object Lock high-water mark](../security/object-lock.md#the-clock) |
-| `500` | `InternalError` | Check the logs with the request ID |
+| `503` | `ServiceUnavailable` | The server is not ready, the clock is behind the recorded [Object Lock high-water mark](../security/object-lock.md#the-clock), or a change could not be [recorded in the audit trail](../administration/audit-log.md#why-a-change-leaves-two-records) |
+| `500` | `InternalError` | Check the logs with the request ID. Includes stored bytes that no longer match the checksum recorded for them — the server log names the object |
 
 ## Management API errors
 
@@ -159,7 +159,8 @@ Three of these are refusals by design rather than bugs:
 
 | Status | Code | Cause |
 | --- | --- | --- |
-| `503` | `SERVICE_NOT_READY` | A subsystem is not ready — check `/ready` and the logs |
+| `503` | `SERVICE_NOT_READY` | A subsystem is not ready — check `/ready` and the logs. Also returned when a change could not be [recorded in the audit trail](../administration/audit-log.md#why-a-change-leaves-two-records), in which case nothing was changed |
+| `500` | `OBJECT_INTEGRITY_FAILED` | The stored bytes do not match the checksum recorded when they were committed — see [Integrity Verification](../operations/integrity-verification.md) |
 | `500` | `INTERNAL_ERROR` | Check the logs with the request ID |
 
 ## Tracing an error

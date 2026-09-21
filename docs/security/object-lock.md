@@ -106,7 +106,14 @@ be removed by someone who owns the machine.
       not the root credential, not a support escalation, not you.
 - [ ] Grant `s3:BypassGovernanceRetention` separately from `s3:DeleteObjectVersion`, and
       to as few principals as possible.
-- [ ] Review bypass audit records: `record-store audit | grep object-lock.bypass`.
+- [ ] Review bypass audit records: `record-store audit | grep object-lock.bypass`. Each
+      bypass leaves an `attempted` record and an outcome; an `attempted` with no outcome
+      is an override this server cannot account for and is worth investigating.
+- [ ] Recheck the audit chain periodically:
+      `record-store audit-export verify-chain`. It detects a record edited or removed by
+      anyone who could not also rewrite every later link — which is not the same as
+      detecting the operator of this host. See
+      [Audit Log](../administration/audit-log.md#checking-the-log-has-not-been-edited).
 - [ ] Review lifecycle skip records, so a rule that silently expires nothing is visible.
 - [ ] Run NTP, and alert on the clock-behind-high-water-mark warning.
 - [ ] Keep backups. Object Lock is not one.

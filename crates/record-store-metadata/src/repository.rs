@@ -3,9 +3,9 @@
 use async_trait::async_trait;
 use record_store_core::{
     Bucket, BucketId, BucketName, BucketQuota, CorsConfiguration, LifecycleRule, LifecycleRuleId,
-    MultipartUpload, ObjectId, ObjectKey, ObjectLockConfiguration, ObjectLockState, ObjectMetadata,
-    ObjectVersionRecord, PartNumber, StorageUsage, UploadId, UploadedPart, VersionId,
-    VersioningState,
+    MultipartUpload, MutationEvent, ObjectId, ObjectKey, ObjectLockConfiguration, ObjectLockState,
+    ObjectMetadata, ObjectVersionRecord, PartNumber, StorageUsage, UploadId, UploadedPart,
+    VersionId, VersioningState, WriteOrigin,
 };
 
 use crate::*;
@@ -42,11 +42,29 @@ pub trait MetadataRepository: Send + Sync {
     /// Publishes a version together with the Object Lock state it is born
     /// with, in one transaction, so a crash cannot durably lose the retention a
     /// write was accepted under.
+    /// Publishes a version, with the reason it is being written.
+    ///
+    /// The origin is not decoration: the event a subscriber receives is derived
+    /// from it inside the committing transaction, and a copy, a restore, and a
+    /// completed multipart upload are otherwise indistinguishable there.
     async fn put_object(
         &self,
         metadata: &ObjectMetadata,
         object_lock: Option<ObjectLockState>,
+        origin: WriteOrigin,
     ) -> Result<ObjectCommitResult, MetadataError>;
+    /// Returns journalled storage events after `after`, in commit order.
+    ///
+    /// These are the events committed mutations still owe. They stay until an
+    /// outbox has taken them, so this is what a restart resumes from.
+    async fn pending_mutation_events(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<MutationEvent>, MetadataError>;
+    /// Removes journalled events an outbox has taken, up to and including
+    /// `through_sequence`.
+    async fn prune_mutation_events(&self, through_sequence: u64) -> Result<(), MetadataError>;
     async fn get_object(
         &self,
         bucket: BucketId,

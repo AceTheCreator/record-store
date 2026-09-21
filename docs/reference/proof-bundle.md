@@ -101,6 +101,11 @@ human-readable `detail`. Reasons:
 | `version_predates_chain` | The chain exists, but this version was written before it |
 | `not_yet_checkpointed` | Records exist but are not yet covered by a checkpoint |
 
+This release reports `not_yet_checkpointed`: the audit log **is** hash-chained, and
+nothing checkpoints it, so there is no Merkle root for a bundle to carry. Recheck the
+chain directly with
+[`record-store audit-export verify-chain`](../administration/audit-log.md#checking-the-log-has-not-been-edited).
+
 **`status: "present"`** carries `records`, a `checkpoint`, and an optional
 `anchor`:
 
@@ -330,8 +335,8 @@ An object written to a deployment whose master key is
   },
   "history": {
     "status": "unavailable",
-    "reason": "chain_not_enabled",
-    "detail": "this deployment does not yet maintain a tamper-evident audit chain, so no audit records, checkpoint root, or anchor receipt are included"
+    "reason": "not_yet_checkpointed",
+    "detail": "this deployment maintains a hash-chained audit log, which detects a record edited or removed by anyone who cannot rewrite every later link. It does not yet produce checkpoints or external anchors, so no Merkle root and no inclusion path can be included here, and this bundle establishes nothing against an operator who rewrote the whole log. Verify the chain directly with GET /api/v1/audit/chain."
   },
   "deployment": {
     "algorithm": "ed25519",
@@ -364,7 +369,8 @@ records/statement.pdf version e9a1f157-e984-4b55-917c-1b792b8b928f
   [not proved] deployment identity: … No expected key was supplied, so this does not
       establish which deployment produced it.
   [ok] payload digest: the file matches the SHA-256 recorded at write time (de911d19…)
-  [not proved] audit history: this bundle carries no audit history (chain not enabled) …
+  [not proved] audit history: this bundle carries no audit history (not yet covered by
+      a checkpoint) …
   [not proved] external anchor: without audit history there is no checkpoint to anchor …
 
 VERIFIED: every check that could be performed passed.

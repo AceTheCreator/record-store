@@ -61,6 +61,30 @@ pinned byte-for-byte by its own tests. A verifier that is handed `record_hash`
 — as a proof bundle hands it — does not need to reproduce it; a verifier
 recomputing a record from its event does.
 
+One part of that encoding is worth restating here, because it is the only field
+whose wire form is not obvious from the event's JSON: the result is a single octet.
+
+| Result | Octet |
+| --- | --- |
+| `success` | `0x00` |
+| `denied` | `0x01` |
+| `failure` | `0x02` |
+| `attempted` | `0x03` |
+
+The values are appended, never renumbered. Renumbering one would silently change the
+hash of every record already written with it.
+
+## Where the chain begins
+
+Records written before a deployment maintained a chain carry no links at all. They
+remain in the log and remain queryable, and they are reported as `unchained` rather
+than as verified: they are not evidence of anything, and presenting them as verified
+would be manufacturing evidence they never had.
+
+Positions are gapless. A verifier that finds a sequence missing below the head has
+found a deletion — the record that would have carried the broken link is the one that
+is gone, so the sequence is what catches it rather than the links.
+
 ## Merkle construction
 
 The tree is built over the record hashes the checkpoint covers, **in sequence

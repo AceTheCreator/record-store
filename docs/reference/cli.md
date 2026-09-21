@@ -120,12 +120,19 @@ record-store bucket object-lock status <name> <key> [--version-id <id>] --endpoi
 record-store audit-export export --from <rfc3339> --to <rfc3339> \
   --format json|csv --out <dir> --endpoint <endpoint>
 record-store audit-export retention-report --endpoint <endpoint>
+record-store audit-export verify-chain [--from <sequence>] [--limit <n>] --endpoint <endpoint>
 ```
 
 `export` writes a directory holding the records, a manifest, the covering
 checkpoint roots, and a `SHA256SUMS` over all three. The range is `[from, to)`,
-so adjacent exports tile without duplicating a boundary record. Both commands
-are readable with the auditor token. See
+so adjacent exports tile without duplicating a boundary record.
+
+`verify-chain` recomputes the audit hash chain and reports whether the log still
+verifies. A long log is walked in spans: follow `next_from` until it is absent. What
+it does and does not establish is set out in
+[Audit Log](../administration/audit-log.md#checking-the-log-has-not-been-edited).
+
+All three are readable with the auditor token. See
 [Audit Export](../administration/audit-export.md).
 
 `delete` requires the bucket to be empty. There is no `versioning disable` — see

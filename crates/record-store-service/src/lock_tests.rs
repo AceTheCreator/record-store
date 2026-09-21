@@ -19,9 +19,13 @@ async fn locked_bucket(services: &crate::Services, name: &str) -> BucketName {
     bucket
 }
 
-/// Every bypass writes a durable record, including one that did not work. An
+/// Every bypass writes durable records, including one that did not work. An
 /// attempted override of a retention is exactly as interesting to an auditor as
 /// a successful one.
+///
+/// Two records per bypass, not one: the first is written before the version can
+/// be gone, so a crash during the delete leaves evidence that somebody
+/// authorized an override rather than leaving nothing at all.
 #[tokio::test]
 async fn every_governance_bypass_is_recorded_whether_or_not_it_succeeds() {
     let (_directory, services, audit) = services_with_audit().await;
@@ -107,7 +111,18 @@ async fn every_governance_bypass_is_recorded_whether_or_not_it_succeeds() {
         })
         .await
         .expect("audit query");
-    assert_eq!(page.events.len(), 2, "both attempts are recorded");
+    assert_eq!(
+        page.events.len(),
+        4,
+        "each bypass is announced and then resolved: {:?}",
+        page.events
+    );
+    let announced = page
+        .events
+        .iter()
+        .filter(|event| event.result == AuditResult::Attempted)
+        .count();
+    assert_eq!(announced, 2, "both bypasses were announced before they ran");
     assert!(
         page.events
             .iter()
@@ -125,6 +140,80 @@ async fn every_governance_bypass_is_recorded_whether_or_not_it_succeeds() {
             "a record names the version it concerns"
         );
     }
+    // Each outcome names the announcement it resolves, so a reader pairs them
+    // without having to guess from timestamps.
+    for outcome in page
+        .events
+        .iter()
+        .filter(|event| event.result != AuditResult::Attempted)
+    {
+        let named = outcome
+            .metadata
+            .get(record_store_audit::intent::INTENT_EVENT_ID)
+            .expect("an outcome names its announcement");
+        assert!(
+            page.events
+                .iter()
+                .any(|event| &event.event_id.to_string() == named),
+            "the announcement it names must be in the trail"
+        );
+    }
+}
+
+/// A bypass is only permitted where the evidence can be written. A deployment
+/// with no durable trail refuses it rather than releasing a retained version
+/// with nothing to show for it.
+#[tokio::test]
+async fn a_bypass_is_refused_when_no_durable_trail_exists_to_record_it() {
+    let (_directory, services) = crate::test_support::services().await;
+    let bucket = BucketName::new("unrecorded").expect("bucket");
+    services
+        .buckets
+        .create_locked(bucket.clone(), None, true)
+        .await
+        .expect("create locked bucket");
+    let key = ObjectKey::new("draft.txt").expect("key");
+    let stored = services
+        .objects
+        .put(ServicePutRequest {
+            bucket: bucket.clone(),
+            key: key.clone(),
+            content_type: None,
+            custom_metadata: std::collections::BTreeMap::new(),
+            expected_checksum: None,
+            object_lock: Some(ObjectLockState {
+                retention: Some(Retention {
+                    mode: RetentionMode::Governance,
+                    retain_until: Utc::now() + Duration::days(30),
+                }),
+                legal_hold: false,
+            }),
+            body: body(b"draft"),
+        })
+        .await
+        .expect("put under governance retention");
+
+    let refused = services
+        .objects
+        .delete_version(
+            &bucket,
+            key.clone(),
+            stored.metadata.version_id,
+            &LockContext::principal("service_account:nobody").with_governance_bypass(true),
+        )
+        .await
+        .expect_err("a bypass with nowhere to record it must be refused");
+    assert!(
+        matches!(refused, ServiceError::BypassNotRecordable),
+        "{refused}"
+    );
+
+    // And the version is still there, which is the point.
+    services
+        .objects
+        .head_version(&bucket, key, stored.metadata.version_id)
+        .await
+        .expect("the retained version survives a refused bypass");
 }
 
 /// An operation that presents no bypass must not produce a bypass record, or

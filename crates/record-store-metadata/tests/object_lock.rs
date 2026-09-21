@@ -12,7 +12,7 @@ use record_store_core::{
     Bucket, BucketId, BucketName, BucketQuota, Checksum, DefaultRetention, ETag, LockBlock,
     LockChangeRefused, ObjectId, ObjectKey, ObjectLockConfiguration, ObjectLockState,
     ObjectMetadata, OrganizationId, Retention, RetentionMode, RetentionPeriod, VersionId,
-    VersioningState,
+    VersioningState, WriteOrigin,
 };
 use record_store_metadata::{
     LockRelease, MetadataError, MetadataRepository, NewDeleteMarker, RedbMetadataRepository,
@@ -80,7 +80,7 @@ async fn locked_version(
     repository.create_bucket(&bucket).await.expect("bucket");
     let metadata = object(bucket.id, "statement.pdf");
     repository
-        .put_object(&metadata, Some(state))
+        .put_object(&metadata, Some(state), WriteOrigin::Direct)
         .await
         .expect("put object");
     (directory, repository, bucket, metadata)
@@ -263,7 +263,7 @@ async fn overwriting_a_key_adds_a_version_and_leaves_the_locked_one_intact() {
     let mut second = object(bucket.id, "statement.pdf");
     second.size = 22;
     repository
-        .put_object(&second, None)
+        .put_object(&second, None, WriteOrigin::Direct)
         .await
         .expect("overwrite publishes a new version");
 
@@ -348,7 +348,10 @@ async fn a_lock_cannot_be_placed_on_a_bucket_without_object_lock() {
     bucket.versioning = VersioningState::Enabled;
     repository.create_bucket(&bucket).await.expect("bucket");
     let metadata = object(bucket.id, "note.txt");
-    repository.put_object(&metadata, None).await.expect("put");
+    repository
+        .put_object(&metadata, None, WriteOrigin::Direct)
+        .await
+        .expect("put");
 
     let error = repository
         .put_object_lock(

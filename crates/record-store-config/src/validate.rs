@@ -49,6 +49,12 @@ impl Config {
             );
         }
         issues.extend(self.cluster.issues(self.server.mode));
+        if self.server.trusted_proxies.len() > 64 {
+            issues.push("server.trusted_proxies must list at most 64 entries".to_owned());
+        }
+        if let Err(error) = self.server.parsed_trusted_proxies() {
+            issues.push(format!("server.trusted_proxies is invalid: {error}"));
+        }
         if !(1..=300).contains(&self.server.shutdown_grace_period_seconds) {
             issues
                 .push("server.shutdown_grace_period_seconds must be between 1 and 300".to_owned());

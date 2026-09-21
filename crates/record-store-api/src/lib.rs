@@ -16,7 +16,7 @@ use crate::handlers::accounts::{
     issue_temporary_credential, list_service_accounts, rotate_credential, set_credential_status,
     set_service_account_status,
 };
-use crate::handlers::audit::list_audit_events;
+use crate::handlers::audit::{list_audit_events, verify_audit_chain};
 use crate::handlers::buckets::{
     create_bucket, delete_bucket, get_bucket_object_lock, get_bucket_versioning, get_object_lock,
     list_buckets, set_bucket_object_lock, set_bucket_quota, set_bucket_versioning,
@@ -50,16 +50,19 @@ use crate::metrics::{metrics, system_metrics};
 use axum::{
     Router,
     extract::{ConnectInfo, DefaultBodyLimit, Extension, Request, State},
-    http::{HeaderValue, StatusCode, header::HeaderName},
+    http::{HeaderValue, header::HeaderName},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get},
 };
-use record_store_audit::{AuditEvent, AuditRepository, AuditResult};
+use record_store_audit::{
+    AuditEvent, AuditRepository,
+    intent::{intent_event, method_mutates, outcome_event, result_for_status},
+};
 use record_store_auth::CredentialManager;
 use record_store_config::DeploymentMode;
 use record_store_consensus::MetadataConsensus;
-use record_store_core::OrganizationId;
+use record_store_core::{OrganizationId, TrustedProxies};
 use record_store_events::EventRepository;
 use record_store_metadata::MetadataRepository;
 use record_store_replication::{ClusterContext, ClusterOperations, ClusterStatus, TaskHealth};
@@ -153,6 +156,7 @@ pub struct AppState {
     sharing_metrics: Arc<SharingMetrics>,
     proof_signer: Option<Arc<record_store_proof::BundleSigner>>,
     metrics_history: Arc<crate::history::MetricsHistory>,
+    trusted_proxies: Arc<TrustedProxies>,
 }
 
 /// Cluster services exposed through the authenticated management API.
@@ -238,7 +242,20 @@ impl AppState {
             sharing_metrics: Arc::new(SharingMetrics::default()),
             proof_signer: None,
             metrics_history: Arc::new(crate::history::MetricsHistory::new(chrono::Utc::now())),
+            trusted_proxies: Arc::new(TrustedProxies::default()),
         }
+    }
+
+    /// Names the reverse-proxy hops whose forwarding headers may be believed.
+    ///
+    /// Until one is named, a request is attributed to the socket it arrived
+    /// on. That is coarse behind a proxy and it is the only safe default:
+    /// believing an unverified header lets a caller choose the identity that
+    /// abuse controls and audit records are written against.
+    #[must_use]
+    pub fn with_trusted_proxies(mut self, trusted_proxies: TrustedProxies) -> Self {
+        self.trusted_proxies = Arc::new(trusted_proxies);
+        self
     }
 
     /// Records how this process participates in a deployment.
@@ -481,6 +498,7 @@ pub fn router(state: AppState) -> Router {
             axum::routing::post(storage_repair),
         )
         .route("/api/v1/audit/events", get(list_audit_events))
+        .route("/api/v1/audit/chain", get(verify_audit_chain))
         .route("/api/v1/webhooks", get(list_webhooks).post(create_webhook))
         .route("/api/v1/webhooks/{id}", delete(delete_webhook))
         .route(
@@ -636,7 +654,7 @@ pub fn router(state: AppState) -> Router {
             axum::routing::post(sharing::revoke_embed),
         )
         .route_layer(middleware::from_fn_with_state(
-            state.management_auth.clone(),
+            state.clone(),
             require_management,
         ));
     let operational_metrics =
@@ -733,8 +751,16 @@ where
     }
 }
 
+/// The intent record a mutating management request wrote before it ran.
+///
+/// Carried on the response so the outermost layer, which is what sees the
+/// status, writes the completion as the second half of that pair rather than
+/// as a second unrelated record.
+#[derive(Clone)]
+pub(crate) struct AuditIntent(AuditEvent);
+
 async fn require_management(
-    State(authentication): State<ManagementAuth>,
+    State(state): State<AppState>,
     mut request: Request,
     next: Next,
 ) -> Response {
@@ -743,15 +769,47 @@ async fn require_management(
         .get::<RequestId>()
         .cloned()
         .unwrap_or_else(RequestId::new);
-    let Some(principal) = authentication.authenticate(&request) else {
+    let Some(principal) = state.management_auth.authenticate(&request) else {
         return ApiError::unauthorized(request_id).into_response();
     };
     if !principal.permits(&request) {
         return ApiError::forbidden(request_id).into_response();
     }
+    // Authorization has passed and the handler is about to be able to change
+    // durable state, so this is the last moment at which the trail can be
+    // written *before* the change rather than after it.
+    let intent = if method_mutates(request.method().as_str()) {
+        let source_ip = sharing_client_address(&state.trusted_proxies, &request);
+        let path = redact_capability_path(request.uri().path());
+        let event = intent_event(
+            Some(request_id.to_string()),
+            principal.audit_name().to_owned(),
+            None,
+            source_ip,
+            format!("{} {path}", request.method()),
+            path,
+        );
+        if let Err(error) = state.audit.append(&event).await {
+            // A management mutation that cannot be announced is not performed.
+            // Letting it through would produce exactly the change nobody can
+            // account for afterwards that the trail exists to prevent.
+            error!(
+                %error,
+                request_id = %request_id,
+                "refusing a mutating management request: its audit intent could not be made durable"
+            );
+            return ApiError::service_unavailable(request_id).into_response();
+        }
+        Some(AuditIntent(event))
+    } else {
+        None
+    };
     request.extensions_mut().insert(principal);
     let mut response = next.run(request).await;
     response.extensions_mut().insert(principal);
+    if let Some(intent) = intent {
+        response.extensions_mut().insert(intent);
+    }
     response
 }
 
@@ -806,14 +864,15 @@ async fn request_context(
     // because deciding what counts as "one client" is a policy question that
     // deserves a single answer rather than one per route.
     let client = ClientIdentity(sharing::client_identity(
+        &state.trusted_proxies,
         request.headers(),
         request.extensions().get::<ConnectInfo<SocketAddr>>(),
     ));
+    // The audit trail records the same address the abuse controls act on, so
+    // an operator correlating a throttled client with its records is looking
+    // at one identity rather than two that disagree.
+    let source_ip = Some(client.as_str().to_owned()).filter(|value| value != "unknown");
     request.extensions_mut().insert(client);
-    let source_ip = request
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|connect| connect.0.ip().to_string());
     let started = Instant::now();
     let span = info_span!(
         "http.request",
@@ -830,36 +889,49 @@ async fn request_context(
             .insert(REQUEST_ID_HEADER.clone(), value);
     }
     if path.starts_with("/api/v1/") {
-        let result = match response.status() {
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => AuditResult::Denied,
-            status if status.is_success() => AuditResult::Success,
-            _ => AuditResult::Failure,
-        };
-        let event = AuditEvent {
-            event_id: record_store_core::AuditEventId::new(),
-            timestamp: chrono::Utc::now(),
-            request_id: Some(request_id.to_string()),
-            principal: response
-                .extensions()
-                .get::<ManagementPrincipal>()
-                .copied()
-                .map_or(
-                    "management:unauthenticated",
-                    ManagementPrincipal::audit_name,
-                )
-                .into(),
-            credential_id: None,
-            source_ip,
-            operation: format!("{method} {logged_path}"),
-            resource: logged_path,
-            result,
-            metadata: Default::default(),
+        let result = result_for_status(response.status().as_u16());
+        // A mutating request announced itself before it ran; its completion is
+        // the second half of that pair. Everything else — reads, refusals, and
+        // probes of routes that do not exist — leaves the single record it
+        // always has.
+        let event = match response.extensions().get::<AuditIntent>() {
+            Some(AuditIntent(intent)) => outcome_event(intent, result),
+            None => AuditEvent {
+                event_id: record_store_core::AuditEventId::new(),
+                timestamp: chrono::Utc::now(),
+                request_id: Some(request_id.to_string()),
+                principal: response
+                    .extensions()
+                    .get::<ManagementPrincipal>()
+                    .copied()
+                    .map_or(
+                        "management:unauthenticated",
+                        ManagementPrincipal::audit_name,
+                    )
+                    .into(),
+                credential_id: None,
+                source_ip,
+                operation: format!("{method} {logged_path}"),
+                resource: logged_path,
+                result,
+                metadata: Default::default(),
+            },
         };
         if let Err(error) = state.audit.append(&event).await {
             error!(%error, request_id = %request_id, "durable audit append failed");
         }
     }
     response
+}
+
+/// Resolves the client address of a request under the trusted-proxy policy.
+fn sharing_client_address(trusted: &TrustedProxies, request: &Request) -> Option<String> {
+    let address = sharing::client_identity(
+        trusted,
+        request.headers(),
+        request.extensions().get::<ConnectInfo<SocketAddr>>(),
+    );
+    (address != "unknown").then_some(address)
 }
 
 /// Who abuse controls treat one public request as coming from.

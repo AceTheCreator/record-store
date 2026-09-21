@@ -79,29 +79,37 @@ impl LockPolicy {
             .with_governance_bypass(context.bypass_governance)
     }
 
-    /// Records an exercised governance bypass.
+    /// Announces a governance bypass before the operation that uses it runs.
     ///
-    /// A bypass is the one way a retained version leaves before its date, so it
-    /// is written whether or not the operation that used it went on to succeed.
-    /// The record names the version by its identifier and carries no credential.
-    pub(crate) async fn record_bypass(
+    /// A bypass is the one way a retained version leaves before its date, so
+    /// the evidence has to be durable *before* the version can be gone. A
+    /// record written afterwards is lost by exactly the crash that would make
+    /// it matter most.
+    ///
+    /// Two failures refuse the operation outright rather than proceeding
+    /// unrecorded, because a bypass nobody can account for afterwards is worse
+    /// than a bypass that did not happen:
+    ///
+    /// - no audit trail is configured at all, so no evidence is possible;
+    /// - the trail is configured and cannot be written.
+    pub(crate) async fn begin_bypass(
         &self,
         context: &LockContext,
         operation: &str,
         bucket: &BucketName,
         key: &ObjectKey,
         version_id: VersionId,
-        result: AuditResult,
-    ) {
+    ) -> Result<Option<AuditEvent>, ServiceError> {
+        if !context.bypass_governance {
+            return Ok(None);
+        }
         let Some(audit) = &self.audit else {
-            // Without a durable audit trail a bypass would leave no trace, which
-            // is worse than noisy. It is surfaced rather than dropped quietly.
             warn!(
                 operation,
                 principal = %context.principal,
-                "governance bypass exercised with no durable audit trail configured"
+                "refusing a governance bypass: no durable audit trail is configured"
             );
-            return;
+            return Err(ServiceError::BypassNotRecordable);
         };
         let mut metadata = BTreeMap::new();
         metadata.insert("version_id".into(), version_id.to_string());
@@ -115,11 +123,34 @@ impl LockPolicy {
             source_ip: None,
             operation: operation.to_owned(),
             resource: format!("bucket:{bucket}/{key}"),
-            result,
+            result: AuditResult::Attempted,
             metadata,
         };
-        if let Err(error) = audit.append(&event).await {
-            warn!(%error, operation, "durable object lock bypass audit append failed");
+        match audit.append(&event).await {
+            Ok(()) => Ok(Some(event)),
+            Err(error) => {
+                warn!(%error, operation, "refusing a governance bypass: its record could not be made durable");
+                Err(ServiceError::BypassNotRecordable)
+            }
+        }
+    }
+
+    /// Records what the announced bypass went on to do.
+    ///
+    /// A failure here leaves the intent standing alone, which reads as "a
+    /// bypass was authorized and this server cannot say what came of it" —
+    /// the honest state, and one an operator can investigate.
+    pub(crate) async fn complete_bypass(&self, intent: Option<AuditEvent>, result: AuditResult) {
+        let (Some(audit), Some(intent)) = (&self.audit, intent) else {
+            return;
+        };
+        let outcome = record_store_audit::intent::outcome_event(&intent, result);
+        if let Err(error) = audit.append(&outcome).await {
+            warn!(
+                %error,
+                operation = %intent.operation,
+                "the governance bypass record stands without its outcome"
+            );
         }
     }
 }
@@ -329,20 +360,26 @@ impl ObjectLockService {
             .map_err(map_metadata)?;
         let requested = apply(current);
         let release = self.policy.release(context);
+        // Announced before the change is attempted, and refused outright when
+        // it cannot be announced.
+        let intent = self
+            .policy
+            .begin_bypass(context, operation, bucket_name, key, version_id)
+            .await?;
         let result = self
             .metadata
             .put_object_lock(bucket.id, key, version_id, requested, release)
             .await;
-        if context.bypass_governance {
-            let outcome = if result.is_ok() {
-                AuditResult::Success
-            } else {
-                AuditResult::Denied
-            };
-            self.policy
-                .record_bypass(context, operation, bucket_name, key, version_id, outcome)
-                .await;
-        }
+        self.policy
+            .complete_bypass(
+                intent,
+                if result.is_ok() {
+                    AuditResult::Success
+                } else {
+                    AuditResult::Denied
+                },
+            )
+            .await;
         let state = result.map_err(map_metadata)?;
         Ok(VersionLock { version_id, state })
     }

@@ -173,6 +173,25 @@ impl LifecycleWorker {
             for object in page.objects {
                 result.scanned = result.scanned.saturating_add(1);
                 if object.modified_at <= cutoff {
+                    // Announced before the delete, like every other mutating
+                    // path: a crash between the delete and its record would
+                    // otherwise leave an expiry nobody can account for.
+                    let intent = match self
+                        .announce(
+                            "lifecycle.expire-object",
+                            &bucket.name.to_string(),
+                            object.key.as_str(),
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(intent) => intent,
+                        Err(error) => {
+                            result.failures = result.failures.saturating_add(1);
+                            error!(rule_id = %rule.id, key = %object.key, %error, "lifecycle expiry skipped: it could not be announced");
+                            continue;
+                        }
+                    };
                     match self
                         .services
                         .objects
@@ -181,17 +200,17 @@ impl LifecycleWorker {
                     {
                         Ok(true) => {
                             result.expired = result.expired.saturating_add(1);
-                            self.audit_expiration(
-                                "lifecycle.expire-object",
-                                &bucket.name.to_string(),
-                                object.key.as_str(),
-                                None,
-                            )
-                            .await?;
+                            self.resolve(intent, AuditResult::Success).await;
                         }
-                        Ok(false) => {}
+                        Ok(false) => {
+                            // Nothing was there to expire. The announcement
+                            // stands, resolved as a no-op rather than left
+                            // dangling.
+                            self.resolve(intent, AuditResult::Failure).await;
+                        }
                         Err(error) => {
                             result.failures = result.failures.saturating_add(1);
+                            self.resolve(intent, AuditResult::Failure).await;
                             error!(rule_id = %rule.id, key = %object.key, %error, "lifecycle object expiration failed");
                         }
                     }
@@ -216,6 +235,22 @@ impl LifecycleWorker {
                 if !version.is_latest && version.record.created_at() <= cutoff {
                     let key = version.record.key().clone();
                     let version_id = version.record.version_id();
+                    let intent = match self
+                        .announce(
+                            "lifecycle.expire-noncurrent-version",
+                            &bucket.name.to_string(),
+                            key.as_str(),
+                            Some(version_id),
+                        )
+                        .await
+                    {
+                        Ok(intent) => intent,
+                        Err(error) => {
+                            result.failures = result.failures.saturating_add(1);
+                            error!(rule_id = %rule.id, key = %key, %error, "lifecycle version expiry skipped: it could not be announced");
+                            continue;
+                        }
+                    };
                     match self
                         .services
                         .objects
@@ -233,13 +268,7 @@ impl LifecycleWorker {
                     {
                         Ok(()) => {
                             result.expired = result.expired.saturating_add(1);
-                            self.audit_expiration(
-                                "lifecycle.expire-noncurrent-version",
-                                &bucket.name.to_string(),
-                                key.as_str(),
-                                Some(version_id),
-                            )
-                            .await?;
+                            self.resolve(intent, AuditResult::Success).await;
                         }
                         // A retained or held version is not a failure: the rule
                         // and the lock disagree, and the lock wins. The scan
@@ -248,6 +277,7 @@ impl LifecycleWorker {
                         // the bucket from ever expiring.
                         Err(ServiceError::ObjectLocked(block)) => {
                             result.skipped = result.skipped.saturating_add(1);
+                            self.resolve(intent, AuditResult::Denied).await;
                             self.audit_lock_skip(
                                 rule,
                                 &bucket.name.to_string(),
@@ -259,6 +289,7 @@ impl LifecycleWorker {
                         }
                         Err(ServiceError::RetentionClockUnavailable) => {
                             result.skipped = result.skipped.saturating_add(1);
+                            self.resolve(intent, AuditResult::Denied).await;
                             self.audit_lock_skip(
                                 rule,
                                 &bucket.name.to_string(),
@@ -270,6 +301,7 @@ impl LifecycleWorker {
                         }
                         Err(error) => {
                             result.failures = result.failures.saturating_add(1);
+                            self.resolve(intent, AuditResult::Failure).await;
                             error!(rule_id = %rule.id, key = %key, %error, "lifecycle version expiration failed");
                         }
                     }
@@ -316,32 +348,53 @@ impl LifecycleWorker {
         Ok(())
     }
 
-    async fn audit_expiration(
+    /// Announces an expiry before it happens.
+    ///
+    /// The lifecycle worker mutates durable state without a request behind it,
+    /// so it owes the same two records a request does: the announcement is
+    /// durable before the version can be gone, and an announcement with no
+    /// outcome is an expiry this server cannot account for.
+    async fn announce(
         &self,
         operation: &str,
         bucket: &str,
         key: &str,
         version_id: Option<record_store_core::VersionId>,
-    ) -> Result<(), LifecycleError> {
+    ) -> Result<AuditEvent, LifecycleError> {
         let mut metadata = std::collections::BTreeMap::new();
         if let Some(version_id) = version_id {
             metadata.insert("version_id".into(), version_id.to_string());
         }
-        self.audit
-            .append(&AuditEvent {
-                event_id: AuditEventId::new(),
-                timestamp: Utc::now(),
-                request_id: None,
-                principal: "system:lifecycle".into(),
-                credential_id: None,
-                source_ip: None,
-                operation: operation.into(),
-                resource: format!("bucket:{bucket}/{key}"),
-                result: AuditResult::Success,
-                metadata,
-            })
-            .await?;
-        Ok(())
+        let event = AuditEvent {
+            event_id: AuditEventId::new(),
+            timestamp: Utc::now(),
+            request_id: None,
+            principal: "system:lifecycle".into(),
+            credential_id: None,
+            source_ip: None,
+            operation: operation.into(),
+            resource: format!("bucket:{bucket}/{key}"),
+            result: AuditResult::Attempted,
+            metadata,
+        };
+        self.audit.append(&event).await?;
+        Ok(event)
+    }
+
+    /// Records what an announced expiry went on to do.
+    ///
+    /// A failure here leaves the announcement standing alone rather than
+    /// aborting the scan: the pass has already changed durable state, and
+    /// stopping now would strand every later key in the bucket.
+    async fn resolve(&self, intent: AuditEvent, result: AuditResult) {
+        let outcome = record_store_audit::intent::outcome_event(&intent, result);
+        if let Err(error) = self.audit.append(&outcome).await {
+            error!(
+                %error,
+                operation = %intent.operation,
+                "the lifecycle expiry record stands without its outcome"
+            );
+        }
     }
 
     async fn read_cursor(&self, id: LifecycleRuleId) -> Result<RuleCursor, LifecycleError> {
@@ -415,7 +468,7 @@ mod tests {
     use record_store_audit::{AuditQuery, RedbAuditRepository};
     use record_store_core::{
         Bucket, BucketId, BucketName, BucketQuota, Checksum, ETag, ExpirationDays, ObjectId,
-        ObjectKey, ObjectMetadata, OrganizationId, VersionId, VersioningState,
+        ObjectKey, ObjectMetadata, OrganizationId, VersionId, VersioningState, WriteOrigin,
     };
     use record_store_metadata::{MetadataRepository, RedbMetadataRepository};
     use record_store_service::{ObjectLockLimits, ServiceLimits};
@@ -463,6 +516,7 @@ mod tests {
                     modified_at: Utc::now() - chrono::Duration::days(3),
                 },
                 None,
+                WriteOrigin::Direct,
             )
             .await
             .expect("object metadata");
@@ -525,18 +579,34 @@ mod tests {
                 .expect("get")
                 .is_none()
         );
+        // An expiry mutates durable state, so it leaves the same pair every
+        // other mutation does: announced before it happened, resolved after.
+        let events = audit
+            .query(AuditQuery {
+                limit: 10,
+                ..AuditQuery::default()
+            })
+            .await
+            .expect("audit query")
+            .events;
+        assert_eq!(events.len(), 2, "{events:?}");
+        let intent = events
+            .iter()
+            .find(|event| event.result == record_store_audit::AuditResult::Attempted)
+            .expect("the expiry was announced before it happened");
+        let outcome = events
+            .iter()
+            .find(|event| event.result == record_store_audit::AuditResult::Success)
+            .expect("and reported afterwards");
+        assert_eq!(intent.operation, "lifecycle.expire-object");
+        assert_eq!(intent.principal, "system:lifecycle");
         assert_eq!(
-            audit
-                .query(AuditQuery {
-                    limit: 10,
-                    ..AuditQuery::default()
-                })
-                .await
-                .expect("audit query")
-                .events
-                .len(),
-            1
+            outcome
+                .metadata
+                .get(record_store_audit::intent::INTENT_EVENT_ID),
+            Some(&intent.event_id.to_string())
         );
+        assert!(intent.timestamp <= outcome.timestamp);
     }
 
     /// The batch size bounds how much one pass may delete. Zero would make the
@@ -648,6 +718,7 @@ mod tests {
                     modified_at: Utc::now() - chrono::Duration::days(365),
                 },
                 None,
+                WriteOrigin::Direct,
             )
             .await
             .expect("object");
@@ -759,21 +830,22 @@ mod tests {
                     }),
                     legal_hold: false,
                 }),
+                WriteOrigin::Direct,
             )
             .await
             .expect("retained object");
         metadata
-            .put_object(&stored("a-retained.txt"), None)
+            .put_object(&stored("a-retained.txt"), None, WriteOrigin::Direct)
             .await
             .expect("supersede the retained version");
 
         let expirable = stored("b-expirable.txt");
         metadata
-            .put_object(&expirable, None)
+            .put_object(&expirable, None, WriteOrigin::Direct)
             .await
             .expect("expirable object");
         metadata
-            .put_object(&stored("b-expirable.txt"), None)
+            .put_object(&stored("b-expirable.txt"), None, WriteOrigin::Direct)
             .await
             .expect("supersede the expirable version");
 

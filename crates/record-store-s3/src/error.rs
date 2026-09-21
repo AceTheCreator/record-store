@@ -46,6 +46,9 @@ pub(crate) fn service_error(
         | ServiceError::ObjectLockChangeRefused(LockChangeRefused::GovernanceBypassRequired) => {
             S3ErrorKind::ObjectUnderGovernanceRetention
         }
+        // A bypass that cannot be recorded is refused, and the caller is told
+        // the same thing a denied bypass is told: the version stayed.
+        ServiceError::BypassNotRecordable => S3ErrorKind::ObjectUnderGovernanceRetention,
         ServiceError::ObjectLockNotEnabled => S3ErrorKind::ObjectLockNotEnabled,
         ServiceError::ObjectLockConfigurationNotFound => {
             S3ErrorKind::ObjectLockConfigurationNotFound
@@ -62,7 +65,12 @@ pub(crate) fn service_error(
         ServiceError::ClusterUnavailable(_) | ServiceError::DurabilityNotMet(_) => {
             S3ErrorKind::ServiceUnavailable
         }
-        ServiceError::Metadata(_)
+        // S3 has no code for "the bytes we stored are not the bytes we
+        // committed", and inventing one would break clients that branch on the
+        // documented set. It answers 500, which is correct, and the durable
+        // audit record and server log are where the distinction is kept.
+        ServiceError::IntegrityMismatch
+        | ServiceError::Metadata(_)
         | ServiceError::Storage(_)
         | ServiceError::Coordination
         | ServiceError::Unavailable => S3ErrorKind::InternalError,

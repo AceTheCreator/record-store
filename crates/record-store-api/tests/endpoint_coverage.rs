@@ -42,6 +42,9 @@ impl Audience {
 /// The declared audience of every management route.
 const CLASSIFIED: &[(&str, Audience)] = &[
     ("/api/v1/audit/events", Audience::ConsoleAndCli),
+    // Verifying the chain is an auditor's question asked from a shell, and its
+    // answer is a report rather than a screen.
+    ("/api/v1/audit/chain", Audience::Cli),
     ("/api/v1/auth/session", Audience::Console),
     ("/api/v1/buckets", Audience::Console),
     ("/api/v1/buckets/{}", Audience::Console),

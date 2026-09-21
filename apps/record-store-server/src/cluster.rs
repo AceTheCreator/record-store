@@ -53,6 +53,43 @@ pub struct ClusterDependencies {
     pub process: ClusterProcess,
 }
 
+/// Restricts journal draining to the member that currently leads.
+///
+/// The storage-event journal is replicated, so every member can see every
+/// pending event. The delivery outbox is not: it is node-local. Draining from
+/// more than one member at a time would therefore put each event into several
+/// outboxes and deliver it several times.
+///
+/// Leadership is the gate because it is already the cluster's single
+/// serialization point and it moves on its own when a member fails. What it
+/// does *not* give is exactly-once delivery across a handover: the member
+/// taking over resumes from its own outbox position, which may be behind the
+/// one the previous leader had reached, so events near the handover can be
+/// delivered twice. Subscribers deduplicate on the event identifier, which is
+/// allocated when the mutation committed and is the same on every member.
+pub struct LeaderEventPumpGate {
+    consensus: Arc<MetadataConsensus>,
+}
+
+impl LeaderEventPumpGate {
+    /// Creates a gate over one member's consensus handle.
+    #[must_use]
+    pub const fn new(consensus: Arc<MetadataConsensus>) -> Self {
+        Self { consensus }
+    }
+}
+
+#[async_trait::async_trait]
+impl record_store_service::EventPumpGate for LeaderEventPumpGate {
+    async fn active(&self) -> bool {
+        // A read barrier succeeds only where leadership is confirmed by a
+        // quorum. A follower, a member in a minority partition, and a member
+        // that merely believes it leads all fail it, which is the answer this
+        // gate needs.
+        self.consensus.read_barrier_index().await.is_ok()
+    }
+}
+
 /// Running cluster-only services owned by the server process.
 pub struct ClusterProcess {
     runtime: ClusterRuntime,
@@ -982,6 +1019,7 @@ mod tests {
     use futures_util::{TryStreamExt, stream};
     use record_store_core::{
         Bucket, BucketId, BucketName, BucketQuota, ObjectKey, OrganizationId, VersioningState,
+        WriteOrigin,
     };
     use record_store_storage::{GetObjectRequest, PutObjectRequest, upload_stream};
     use tempfile::tempdir;
@@ -1209,6 +1247,7 @@ mod tests {
                 object_id: None,
                 protocol_etag: None,
                 object_lock: None,
+                origin: WriteOrigin::Direct,
                 body: upload_stream(stream::once(async {
                     Ok::<Bytes, io::Error>(Bytes::from_static(PAYLOAD))
                 })),

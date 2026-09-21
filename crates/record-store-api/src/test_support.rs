@@ -38,6 +38,18 @@ const SHARING_KEY: &[u8] = b"sharing-master-key-at-least-32-bytes-long";
 
 /// Builds the management router over real catalog, storage, and audit backends.
 pub(crate) async fn api() -> (TempDir, Router) {
+    let (directory, router, _audit) = api_with_audit(None).await;
+    (directory, router)
+}
+
+/// Builds the same router over a caller-supplied audit trail.
+///
+/// Taking the trail from outside is what lets a test make it fail: the
+/// behaviour when the trail cannot be written is a guarantee, so it has to be
+/// exercised rather than reasoned about.
+pub(crate) async fn api_with_audit(
+    supplied: Option<Arc<dyn AuditRepository>>,
+) -> (TempDir, Router, Arc<dyn AuditRepository>) {
     let directory = tempfile::tempdir().expect("temporary directory");
     let metadata: Arc<dyn MetadataRepository> = Arc::new(
         RedbMetadataRepository::open(directory.path().join("metadata.redb"))
@@ -53,11 +65,14 @@ pub(crate) async fn api() -> (TempDir, Router) {
         .await
         .expect("filesystem store"),
     );
-    let audit: Arc<dyn AuditRepository> = Arc::new(
-        RedbAuditRepository::open(directory.path().join("audit.redb"))
-            .await
-            .expect("audit repository"),
-    );
+    let audit: Arc<dyn AuditRepository> = match supplied {
+        Some(audit) => audit,
+        None => Arc::new(
+            RedbAuditRepository::open(directory.path().join("audit.redb"))
+                .await
+                .expect("audit repository"),
+        ),
+    };
     let events: Arc<dyn EventRepository> = Arc::new(
         RedbEventRepository::open(
             directory.path().join("events.redb"),
@@ -101,7 +116,7 @@ pub(crate) async fn api() -> (TempDir, Router) {
         metadata,
         services,
         credentials,
-        audit,
+        Arc::clone(&audit),
         owner,
         "0.0.0-test",
     )
@@ -124,7 +139,7 @@ pub(crate) async fn api() -> (TempDir, Router) {
         Some(AUDITOR_TOKEN.as_bytes()),
     ))
     .with_metrics_auth(MetricsAuth::bearer_token(METRICS_TOKEN.as_bytes()));
-    (directory, router(state))
+    (directory, router(state), audit)
 }
 
 /// Sends a request as the system administrator.

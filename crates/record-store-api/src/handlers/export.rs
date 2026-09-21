@@ -111,7 +111,7 @@ pub(crate) async fn export_manifest(
         record_file: format.file_name().to_owned(),
         // No audit chain exists yet, so no checkpoint covers the range. Said
         // explicitly, with what it means, rather than left out.
-        checkpoints: CheckpointCoverage::chain_not_enabled(),
+        checkpoints: CheckpointCoverage::not_checkpointed(),
     }))
 }
 

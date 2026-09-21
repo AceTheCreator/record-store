@@ -10,6 +10,7 @@ use tokio::sync::RwLock;
 mod device_store;
 mod encryption;
 mod error;
+mod integrity;
 mod layout;
 mod local_store;
 mod maintenance;
