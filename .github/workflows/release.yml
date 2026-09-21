@@ -233,9 +233,32 @@ jobs:
       #   gh attestation verify record-store-VERSION-linux-amd64.tar.gz \
       #     --repo OWNER/REPO
       - name: Attest the archives
+        id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-path: dist/*.tar.gz
+
+      # The step above registers the attestation with GitHub's attestation API,
+      # which is where `gh attestation verify` looks it up. That is a live
+      # service call: it needs network, it needs the API to still hold the
+      # record, and it tells a downloader nothing they can keep.
+      #
+      # So the same bundle is attached to the release. A downloader gets the
+      # evidence in the same place they got the bytes, can archive it next to
+      # them, and can verify without asking GitHub what it thinks of a file it
+      # is also hosting. It is the asset an auditor is actually able to keep.
+      - name: Publish the provenance alongside the archives
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${BUNDLE:-}" || ! -s "$BUNDLE" ]]; then
+            echo "the attest step produced no bundle to publish" >&2
+            exit 1
+          fi
+          cp "$BUNDLE" "dist/record-store-${VERSION}-provenance.intoto.jsonl"
+          ls -l dist
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

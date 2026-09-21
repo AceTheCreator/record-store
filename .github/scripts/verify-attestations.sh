@@ -109,6 +109,54 @@ for archive in "${archives[@]}"; do
   verify "provenance: $(basename "$archive")" "$archive"
 done
 
+# The checks above ask GitHub's attestation service. That service is not what a
+# downloader ends up holding: the release page is. So the bundle attached to the
+# release is checked as its own artefact, because "the API has provenance" and
+# "the release ships provenance" are different claims and only the second one
+# survives someone archiving the download.
+#
+# This is a structural check, not a second signature check — it confirms the
+# bundle exists, decodes, and names every archive by digest. A bundle copied
+# from the wrong run, or one that silently lost a subject when an architecture
+# was added, fails here.
+echo
+echo "Published provenance bundle"
+bundles=("${asset_directory}"/*.intoto.jsonl)
+if [[ ${#bundles[@]} -eq 0 ]]; then
+  echo "  MISSING   no provenance bundle is attached to the release"
+  missing+=("provenance bundle asset")
+elif [[ ${#bundles[@]} -gt 1 ]]; then
+  echo "  MISSING   ${#bundles[@]} provenance bundles found, expected exactly one"
+  missing+=("provenance bundle asset (ambiguous)")
+else
+  bundle="${bundles[0]}"
+  echo "  ok        bundle: $(basename "$bundle")"
+  # Each line is a Sigstore bundle whose DSSE payload is the in-toto statement.
+  attested="$(
+    jq -r '
+      select(.dsseEnvelope.payload != null)
+      | .dsseEnvelope.payload
+      | @base64d
+      | fromjson
+      | .subject[]?
+      | .digest.sha256 // empty
+    ' "$bundle" 2>/dev/null | sort -u || true
+  )"
+  if [[ -z "$attested" ]]; then
+    echo "  MISSING   the bundle names no subjects"
+    missing+=("provenance bundle subjects")
+  fi
+  for archive in "${archives[@]}"; do
+    digest="$(sha256sum "$archive" | cut -d' ' -f1)"
+    if grep -qxF -- "$digest" <<< "$attested"; then
+      echo "  ok        bundle covers $(basename "$archive")"
+    else
+      echo "  MISSING   the bundle does not cover $(basename "$archive") (${digest})"
+      missing+=("bundle coverage: $(basename "$archive")")
+    fi
+  done
+fi
+
 echo
 if [[ ${#missing[@]} -gt 0 ]]; then
   echo "Refusing to publish: ${#missing[@]} attestation(s) missing." >&2
