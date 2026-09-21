@@ -47,6 +47,13 @@ pub enum ServiceError {
     /// The requested lock change would have released a protected version.
     #[error("object lock change refused: {}", .0.label())]
     ObjectLockChangeRefused(LockChangeRefused),
+    /// A governance bypass was presented but could not be recorded.
+    ///
+    /// Refused rather than performed: a bypass is the one way a retained
+    /// version leaves before its date, and one nobody can account for
+    /// afterwards is worse than one that did not happen.
+    #[error("a governance bypass cannot be exercised without a durable audit record")]
+    BypassNotRecordable,
     /// The bucket does not have Object Lock enabled.
     #[error("object lock is not enabled on this bucket")]
     ObjectLockNotEnabled,
@@ -71,6 +78,13 @@ pub enum ServiceError {
     /// Metadata repository failure.
     #[error("metadata operation failed: {0}")]
     Metadata(#[from] MetadataError),
+    /// Stored bytes did not match what was committed for them.
+    ///
+    /// Kept apart from a generic storage failure because it is not a transient
+    /// condition a caller should retry: the durable bytes are wrong, and the
+    /// operator needs to see that rather than a 500 that looks like a blip.
+    #[error("stored object failed integrity verification")]
+    IntegrityMismatch,
     /// Storage engine failure.
     #[error("storage operation failed: {0}")]
     Storage(#[from] StorageError),
@@ -137,6 +151,7 @@ pub(crate) fn map_storage(error: StorageError) -> ServiceError {
         | StorageError::Metadata(error @ MetadataError::InvalidObjectLock(_)) => {
             map_metadata(error)
         }
+        StorageError::IntegrityMismatch => ServiceError::IntegrityMismatch,
         StorageError::ClusterUnavailable(reason) => ServiceError::ClusterUnavailable(reason),
         StorageError::NoHealthyReplica => {
             ServiceError::ClusterUnavailable(StorageError::NoHealthyReplica.to_string())
@@ -258,8 +273,19 @@ mod tests {
     #[test]
     fn unrecognised_storage_failures_are_preserved_for_diagnosis() {
         assert!(matches!(
+            map_storage(StorageError::Coordination),
+            ServiceError::Storage(StorageError::Coordination)
+        ));
+    }
+
+    /// Corrupt stored bytes are not a generic backend failure. The category
+    /// has to survive the mapping or every protocol reports them as a retryable
+    /// internal error, which is the opposite of what an operator needs to see.
+    #[test]
+    fn an_integrity_failure_keeps_its_own_category() {
+        assert!(matches!(
             map_storage(StorageError::IntegrityMismatch),
-            ServiceError::Storage(StorageError::IntegrityMismatch)
+            ServiceError::IntegrityMismatch
         ));
     }
 }

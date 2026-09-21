@@ -5,8 +5,8 @@ use std::sync::{Arc, atomic::Ordering};
 use futures_util::StreamExt;
 use record_store_core::{
     BucketName, ObjectKey, ObjectLockState, ObjectMetadata, ObjectVersionRecord, VersionId,
+    WriteOrigin,
 };
-use record_store_events::{EventRepository, StorageEvent, StorageEventType};
 use record_store_metadata::{
     ListObjectVersionsRequest as MetadataVersionListRequest, MetadataRepository,
 };
@@ -17,7 +17,6 @@ use record_store_storage::{
 use tokio::sync::Semaphore;
 
 use crate::error::map_storage;
-use crate::events::publish_event;
 use crate::lock::LockPolicy;
 use crate::services::BucketCoordinator;
 use crate::*;
@@ -31,7 +30,6 @@ pub struct ObjectService {
     pub(crate) metrics: Arc<ServiceMetrics>,
     pub(crate) maximum_custom_metadata_entries: usize,
     pub(crate) maximum_custom_metadata_bytes: usize,
-    pub(crate) events: Option<Arc<dyn EventRepository>>,
     pub(crate) policy: Arc<LockPolicy>,
 }
 
@@ -45,16 +43,6 @@ impl ObjectService {
         let lock = self.coordinator.lock(bucket.id)?;
         let _bucket_guard = lock.read().await;
         let object_lock = ObjectLockService::initial_state(&bucket, request.object_lock)?;
-        let event_type = if self
-            .metadata
-            .get_object(bucket.id, &request.key)
-            .await?
-            .is_some()
-        {
-            StorageEventType::ObjectUpdated
-        } else {
-            StorageEventType::ObjectCreated
-        };
         let result = self
             .storage
             .put(PutObjectRequest {
@@ -66,6 +54,7 @@ impl ObjectService {
                 object_id: None,
                 protocol_etag: None,
                 object_lock,
+                origin: WriteOrigin::Direct,
                 body: request.body,
             })
             .await
@@ -76,15 +65,6 @@ impl ObjectService {
                 self.metrics
                     .upload_bytes
                     .fetch_add(result.metadata.size, Ordering::Relaxed);
-                publish_event(
-                    &self.events,
-                    StorageEvent::new(event_type, bucket.name.as_str()).object(
-                        result.metadata.key.as_str(),
-                        Some(result.metadata.version_id),
-                        Some(result.metadata.size),
-                    ),
-                )
-                .await;
                 Ok(result)
             }
             Err(error) => {
@@ -286,17 +266,6 @@ impl ObjectService {
             Err(StorageError::ObjectNotFound) => false,
             Err(error) => return Err(map_storage(error)),
         };
-        if result {
-            publish_event(
-                &self.events,
-                StorageEvent::new(StorageEventType::ObjectDeleted, bucket.name.as_str()).object(
-                    key.as_str(),
-                    None,
-                    None,
-                ),
-            )
-            .await;
-        }
         Ok(result)
     }
 
@@ -328,20 +297,6 @@ impl ObjectService {
             }
             Err(error) => return Err(map_storage(error)),
         };
-        if result.previously_visible || result.delete_marker.is_some() {
-            publish_event(
-                &self.events,
-                StorageEvent::new(StorageEventType::ObjectDeleted, bucket.name.as_str()).object(
-                    key.as_str(),
-                    result
-                        .delete_marker
-                        .as_ref()
-                        .map(|marker| marker.version_id),
-                    None,
-                ),
-            )
-            .await;
-        }
         Ok(ServiceDeleteResult {
             delete_marker: result.delete_marker,
             previously_visible: result.previously_visible,
@@ -366,6 +321,18 @@ impl ObjectService {
         let bucket = self.resolve_bucket(bucket_name).await?;
         let lock = self.coordinator.lock(bucket.id)?;
         let _guard = lock.read().await;
+        // The bypass is announced before the version can be gone, and the
+        // deletion is refused when the announcement cannot be made durable.
+        let intent = self
+            .policy
+            .begin_bypass(
+                context,
+                "object-lock.bypass-delete-version",
+                bucket_name,
+                &key,
+                version_id,
+            )
+            .await?;
         let result = self
             .storage
             .delete_version(DeleteObjectVersionRequest {
@@ -376,33 +343,17 @@ impl ObjectService {
             })
             .await
             .map_err(map_storage);
-        if context.bypass_governance {
-            let outcome = if result.is_ok() {
-                record_store_audit::AuditResult::Success
-            } else {
-                record_store_audit::AuditResult::Denied
-            };
-            self.policy
-                .record_bypass(
-                    context,
-                    "object-lock.bypass-delete-version",
-                    bucket_name,
-                    &key,
-                    version_id,
-                    outcome,
-                )
-                .await;
-        }
+        self.policy
+            .complete_bypass(
+                intent,
+                if result.is_ok() {
+                    record_store_audit::AuditResult::Success
+                } else {
+                    record_store_audit::AuditResult::Denied
+                },
+            )
+            .await;
         result?;
-        publish_event(
-            &self.events,
-            StorageEvent::new(StorageEventType::ObjectDeleted, bucket.name.as_str()).object(
-                key.as_str(),
-                Some(version_id),
-                None,
-            ),
-        )
-        .await;
         Ok(())
     }
 

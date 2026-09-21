@@ -123,15 +123,23 @@ pub enum CheckpointCoverage {
 }
 
 impl CheckpointCoverage {
-    /// Returns the coverage a deployment without an audit chain reports.
+    /// Returns the coverage a deployment without checkpoints reports.
+    ///
+    /// The log is hash-chained, which is a real property and a narrower one
+    /// than an auditor might assume from an export arriving with digests
+    /// attached. Naming the gap precisely is the point of the field.
     #[must_use]
-    pub fn chain_not_enabled() -> Self {
+    pub fn not_checkpointed() -> Self {
         Self::Unavailable {
-            reason: "chain_not_enabled".to_owned(),
-            detail: "this deployment does not maintain a tamper-evident audit chain, so no \
-                     checkpoint covers this range. The SHA256SUMS file establishes that this \
-                     copy reached you unaltered; it does not establish that the log was not \
-                     edited before the copy was taken."
+            reason: "not_yet_checkpointed".to_owned(),
+            detail: "this deployment maintains a hash-chained audit log but does not yet \
+                     produce checkpoints, so no Merkle root covers this range. The \
+                     SHA256SUMS file establishes that this copy reached you unaltered. The \
+                     chain establishes that no record was edited or removed by anyone who \
+                     could not also rewrite every later link — verify it with \
+                     GET /api/v1/audit/chain. Neither establishes anything against an \
+                     operator who rewrote the whole log and every hash in it; only an \
+                     external anchor over a checkpoint reaches that far."
                 .to_owned(),
         }
     }
@@ -200,6 +208,7 @@ const fn result_name(result: AuditResult) -> &'static str {
         AuditResult::Success => "success",
         AuditResult::Denied => "denied",
         AuditResult::Failure => "failure",
+        AuditResult::Attempted => "attempted",
     }
 }
 
@@ -352,6 +361,7 @@ mod tests {
         assert_eq!(result_name(AuditResult::Success), "success");
         assert_eq!(result_name(AuditResult::Denied), "denied");
         assert_eq!(result_name(AuditResult::Failure), "failure");
+        assert_eq!(result_name(AuditResult::Attempted), "attempted");
     }
 
     #[test]
@@ -378,13 +388,17 @@ mod tests {
     /// auditor cannot tell "no checkpoint" from "checkpoint omitted".
     #[test]
     fn uncovered_ranges_carry_an_explicit_reason() {
-        let coverage = CheckpointCoverage::chain_not_enabled();
+        let coverage = CheckpointCoverage::not_checkpointed();
         let encoded = serde_json::to_string(&coverage).expect("encode");
         assert!(encoded.contains("\"status\":\"unavailable\""), "{encoded}");
-        assert!(encoded.contains("chain_not_enabled"), "{encoded}");
+        assert!(encoded.contains("not_yet_checkpointed"), "{encoded}");
         assert!(
-            encoded.contains("does not establish that the log was not"),
+            encoded.contains("Neither establishes anything against an operator"),
             "the limitation travels with the document: {encoded}"
+        );
+        assert!(
+            encoded.contains("hash-chained"),
+            "and so does the property that does hold: {encoded}"
         );
     }
 }

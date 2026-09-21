@@ -38,6 +38,9 @@ impl AuditResult {
             Self::Success => 0,
             Self::Denied => 1,
             Self::Failure => 2,
+            // Appended, never inserted. Renumbering an existing variant would
+            // silently change the hash of every record already written with it.
+            Self::Attempted => 3,
         }
     }
 }

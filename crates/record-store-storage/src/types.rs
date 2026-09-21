@@ -6,7 +6,7 @@ use bytes::Bytes;
 use futures_core::Stream;
 use record_store_core::{
     BucketId, ByteRange, Checksum, ETag, MultipartUpload, ObjectId, ObjectKey, ObjectLockState,
-    ObjectMetadata, PartNumber, ResolvedByteRange, UploadId, UploadedPart, VersionId,
+    ObjectMetadata, PartNumber, ResolvedByteRange, UploadId, UploadedPart, VersionId, WriteOrigin,
 };
 use record_store_metadata::LockRelease;
 
@@ -47,6 +47,12 @@ pub struct PutObjectRequest {
     /// It travels with the payload so that the retention is published in the
     /// same metadata transaction as the version it protects.
     pub object_lock: Option<ObjectLockState>,
+    /// Why this version is being written.
+    ///
+    /// Reaches the catalog unchanged, where the storage event the commit owes
+    /// is derived from it. A copy and a restore both arrive here as a stream of
+    /// bytes and a key; only the caller can say which one this is.
+    pub origin: WriteOrigin,
     /// Incoming payload chunks.
     pub body: UploadStream,
 }

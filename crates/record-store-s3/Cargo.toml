@@ -36,6 +36,7 @@ uuid.workspace = true
 fuzzing = []
 
 [dev-dependencies]
+async-trait.workspace = true
 http-body-util.workspace = true
 record-store-metadata = { path = "../record-store-metadata" }
 proptest.workspace = true

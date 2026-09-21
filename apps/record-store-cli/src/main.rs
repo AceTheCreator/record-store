@@ -540,6 +540,25 @@ enum AuditExportCommand {
         #[command(flatten)]
         endpoint: EndpointArgs,
     },
+    /// Recompute the audit hash chain and report whether it still verifies.
+    ///
+    /// This detects a record that was edited, removed, or reordered by anyone
+    /// who could not also rewrite every later link — which is what an operator
+    /// with database access would have to do. It does not detect an operator
+    /// who rewrote the whole log and every hash in it; only an external anchor
+    /// over a checkpoint reaches that far.
+    ///
+    /// A long log is walked in spans: follow `next_from` until it is absent.
+    VerifyChain {
+        /// Sequence to start from. Zero verifies from the genesis value.
+        #[arg(long, default_value_t = 0)]
+        from: u64,
+        /// Records to examine in this span.
+        #[arg(long, default_value_t = 1_000)]
+        limit: usize,
+        #[command(flatten)]
+        endpoint: EndpointArgs,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1843,6 +1862,21 @@ async fn audit_export(command: AuditExportCommand, json: bool) -> Result<()> {
                 .json::<serde_json::Value>()
                 .await
                 .context("decode retention report")?;
+            print_value(&value, json)
+        }
+        AuditExportCommand::VerifyChain {
+            from,
+            limit,
+            endpoint,
+        } => {
+            let request = client()?
+                .get(api_url(&endpoint, "/api/v1/audit/chain"))
+                .query(&[("from", from.to_string()), ("limit", limit.to_string())]);
+            let value = send_admin(request)
+                .await?
+                .json::<serde_json::Value>()
+                .await
+                .context("decode audit chain verification")?;
             print_value(&value, json)
         }
         AuditExportCommand::Export {

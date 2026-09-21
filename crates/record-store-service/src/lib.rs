@@ -3,7 +3,7 @@
 mod admin;
 mod bucket;
 mod error;
-mod events;
+mod event_pump;
 mod lock;
 #[cfg(test)]
 mod lock_tests;
@@ -18,6 +18,7 @@ mod test_support;
 
 pub use bucket::BucketService;
 pub use error::ServiceError;
+pub use event_pump::{EventPumpGate, StorageEventPump};
 pub use lock::{
     LockContext, LockedBucket, ObjectLockService, RetainedVersion, RetentionReport,
     RetentionStatus, VersionLock,

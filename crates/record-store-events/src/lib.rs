@@ -8,7 +8,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
-use record_store_core::{EventId, VersionId, WebhookId, open_database};
+use record_store_core::{EventId, MutationEvent, VersionId, WebhookId, open_database};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use reqwest::{Client, Url, redirect::Policy};
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,15 @@ const DELIVERY_LOGS: TableDefinition<&[u8], &[u8]> =
 /// read instead.
 const EVENTS_BY_TIME: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("storage_events_by_time_v1");
+/// How far this node's outbox has drained the catalog's event journal.
+///
+/// Advanced in the same transaction that inserts the events and enqueues their
+/// deliveries, so the transfer from journal to outbox is all-or-nothing: an
+/// interrupted drain replays from here and cannot double-enqueue what it
+/// already committed.
+const JOURNAL_WATERMARK: TableDefinition<&str, u64> =
+    TableDefinition::new("event_journal_watermark_v1");
+const LAST_DRAINED_SEQUENCE: &str = "last_drained_sequence";
 const MAX_ERROR_SUMMARY: usize = 512;
 
 /// Builds an index key that sorts by time and then by identifier.
@@ -53,40 +62,11 @@ fn upper_time_key(time: DateTime<Utc>) -> Vec<u8> {
 }
 
 /// Stable storage-event names intended for integrations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StorageEventType {
-    #[serde(rename = "bucket.created")]
-    BucketCreated,
-    #[serde(rename = "bucket.deleted")]
-    BucketDeleted,
-    #[serde(rename = "object.created")]
-    ObjectCreated,
-    #[serde(rename = "object.updated")]
-    ObjectUpdated,
-    #[serde(rename = "object.deleted")]
-    ObjectDeleted,
-    #[serde(rename = "object.restored")]
-    ObjectRestored,
-    #[serde(rename = "multipart.completed")]
-    MultipartCompleted,
-    #[serde(rename = "multipart.aborted")]
-    MultipartAborted,
-}
-
-impl StorageEventType {
-    fn header_value(self) -> &'static str {
-        match self {
-            Self::BucketCreated => "bucket.created",
-            Self::BucketDeleted => "bucket.deleted",
-            Self::ObjectCreated => "object.created",
-            Self::ObjectUpdated => "object.updated",
-            Self::ObjectDeleted => "object.deleted",
-            Self::ObjectRestored => "object.restored",
-            Self::MultipartCompleted => "multipart.completed",
-            Self::MultipartAborted => "multipart.aborted",
-        }
-    }
-}
+///
+/// Defined in the core domain crate because the catalog records the intent to
+/// publish inside the transaction that commits the mutation, and the catalog
+/// must not depend on this crate to do it.
+pub use record_store_core::StorageEventType;
 
 /// Filesystem-independent event envelope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +94,25 @@ impl StorageEvent {
             object: None,
             version_id: None,
             size: None,
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    /// Builds the event a journalled mutation owes.
+    ///
+    /// The identifier comes from the journal rather than being generated here,
+    /// so a drain that is interrupted and replayed publishes the same event
+    /// rather than a duplicate under a new identity.
+    #[must_use]
+    pub fn from_journal(journalled: &MutationEvent) -> Self {
+        Self {
+            id: journalled.event_id,
+            event_type: journalled.event_type,
+            time: journalled.occurred_at,
+            bucket: journalled.bucket.clone(),
+            object: journalled.key.clone(),
+            version_id: journalled.version_id,
+            size: journalled.size,
             metadata: BTreeMap::new(),
         }
     }
@@ -255,6 +254,17 @@ pub struct EventPage {
 #[async_trait]
 pub trait EventRepository: Send + Sync {
     async fn publish(&self, event: &StorageEvent) -> Result<(), EventError>;
+    /// Returns the last journal sequence this outbox has taken.
+    ///
+    /// Zero means it has taken nothing; the catalog allocates sequences from
+    /// one.
+    async fn drained_through(&self) -> Result<u64, EventError>;
+    /// Takes a contiguous run of journalled events into the outbox.
+    ///
+    /// Events at or below the current watermark are skipped, so replaying an
+    /// interrupted drain is safe. Returns the sequence the outbox has now
+    /// taken, which is what the catalog may prune up to.
+    async fn drain_journal(&self, events: &[MutationEvent]) -> Result<u64, EventError>;
     /// Returns recent storage events, newest first.
     ///
     /// Storage events describe what happened to data. They are deliberately kept
@@ -324,6 +334,11 @@ impl RedbEventRepository {
             {
                 write.open_table(EVENTS_BY_TIME).map_err(database_error)?;
             }
+            {
+                write
+                    .open_table(JOURNAL_WATERMARK)
+                    .map_err(database_error)?;
+            }
             write.commit().map_err(database_error)
         })
         .await??;
@@ -382,7 +397,7 @@ impl RedbEventRepository {
             .post(target.url)
             .header("content-type", "application/json")
             .header("x-record-store-event-id", event.id.to_string())
-            .header("x-record-store-event-type", event.event_type.header_value())
+            .header("x-record-store-event-type", event.event_type.as_str())
             .header("x-record-store-event-time", event.time.to_rfc3339())
             .header("x-record-store-signature", signature)
             .body(payload)
@@ -574,6 +589,75 @@ impl RedbEventRepository {
     }
 }
 
+/// Records one event and enqueues its deliveries inside an open transaction.
+///
+/// Shared by direct publication and by draining the catalog's journal so the
+/// two cannot drift on which subscriptions match or what a pending row holds.
+fn insert_event_tx(write: &redb::WriteTransaction, event: &StorageEvent) -> Result<(), EventError> {
+    let mut matching = Vec::new();
+    {
+        let subscriptions = write.open_table(SUBSCRIPTIONS).map_err(database_error)?;
+        for item in subscriptions.iter().map_err(database_error)? {
+            let (_, value) = item.map_err(database_error)?;
+            let subscription: StoredWebhook = serde_json::from_slice(value.value())?;
+            let subscription = subscription.subscription;
+            if subscription.enabled
+                && subscription.event_types.contains(&event.event_type)
+                && subscription
+                    .bucket_filter
+                    .as_ref()
+                    .is_none_or(|bucket| bucket == &event.bucket)
+                && subscription
+                    .object_prefix_filter
+                    .as_ref()
+                    .is_none_or(|prefix| {
+                        event
+                            .object
+                            .as_ref()
+                            .is_some_and(|key| key.starts_with(prefix))
+                    })
+            {
+                matching.push(subscription.id);
+            }
+        }
+    }
+    {
+        let mut events = write.open_table(EVENTS).map_err(database_error)?;
+        let bytes = serde_json::to_vec(event)?;
+        events
+            .insert(event.id.as_uuid().as_bytes().as_slice(), bytes.as_slice())
+            .map_err(database_error)?;
+    }
+    {
+        let mut index = write.open_table(EVENTS_BY_TIME).map_err(database_error)?;
+        index
+            .insert(
+                event_time_key(event.time, event.id).as_slice(),
+                event.id.as_uuid().as_bytes().as_slice(),
+            )
+            .map_err(database_error)?;
+    }
+    {
+        let mut queue = write.open_table(PENDING).map_err(database_error)?;
+        for webhook_id in matching {
+            let pending = PendingDelivery {
+                event_id: event.id,
+                webhook_id,
+                attempts: 0,
+                next_attempt_at: Utc::now(),
+            };
+            let bytes = serde_json::to_vec(&pending)?;
+            queue
+                .insert(
+                    pending_key(event.id, webhook_id).as_slice(),
+                    bytes.as_slice(),
+                )
+                .map_err(database_error)?;
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl EventRepository for RedbEventRepository {
     async fn publish(&self, event: &StorageEvent) -> Result<(), EventError> {
@@ -581,67 +665,59 @@ impl EventRepository for RedbEventRepository {
         let event = event.clone();
         tokio::task::spawn_blocking(move || {
             let write = db.begin_write().map_err(database_error)?;
-            let subscriptions = write.open_table(SUBSCRIPTIONS).map_err(database_error)?;
-            let mut matching = Vec::new();
-            for item in subscriptions.iter().map_err(database_error)? {
-                let (_, value) = item.map_err(database_error)?;
-                let subscription: StoredWebhook = serde_json::from_slice(value.value())?;
-                let subscription = subscription.subscription;
-                if subscription.enabled
-                    && subscription.event_types.contains(&event.event_type)
-                    && subscription
-                        .bucket_filter
-                        .as_ref()
-                        .is_none_or(|bucket| bucket == &event.bucket)
-                    && subscription
-                        .object_prefix_filter
-                        .as_ref()
-                        .is_none_or(|prefix| {
-                            event
-                                .object
-                                .as_ref()
-                                .is_some_and(|key| key.starts_with(prefix))
-                        })
-                {
-                    matching.push(subscription.id);
-                }
-            }
-            drop(subscriptions);
-            {
-                let mut events = write.open_table(EVENTS).map_err(database_error)?;
-                let bytes = serde_json::to_vec(&event)?;
-                events
-                    .insert(event.id.as_uuid().as_bytes().as_slice(), bytes.as_slice())
-                    .map_err(database_error)?;
-            }
-            {
-                let mut index = write.open_table(EVENTS_BY_TIME).map_err(database_error)?;
-                index
-                    .insert(
-                        event_time_key(event.time, event.id).as_slice(),
-                        event.id.as_uuid().as_bytes().as_slice(),
-                    )
-                    .map_err(database_error)?;
-            }
-            {
-                let mut queue = write.open_table(PENDING).map_err(database_error)?;
-                for webhook_id in matching {
-                    let pending = PendingDelivery {
-                        event_id: event.id,
-                        webhook_id,
-                        attempts: 0,
-                        next_attempt_at: Utc::now(),
-                    };
-                    let bytes = serde_json::to_vec(&pending)?;
-                    queue
-                        .insert(
-                            pending_key(event.id, webhook_id).as_slice(),
-                            bytes.as_slice(),
-                        )
-                        .map_err(database_error)?;
-                }
-            }
+            insert_event_tx(&write, &event)?;
             write.commit().map_err(database_error)
+        })
+        .await?
+    }
+
+    async fn drained_through(&self) -> Result<u64, EventError> {
+        let db = Arc::clone(&self.database);
+        tokio::task::spawn_blocking(move || {
+            let read = db.begin_read().map_err(database_error)?;
+            let table = read.open_table(JOURNAL_WATERMARK).map_err(database_error)?;
+            Ok(table
+                .get(LAST_DRAINED_SEQUENCE)
+                .map_err(database_error)?
+                .map_or(0, |value| value.value()))
+        })
+        .await?
+    }
+
+    async fn drain_journal(&self, events: &[MutationEvent]) -> Result<u64, EventError> {
+        let db = Arc::clone(&self.database);
+        let events = events.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let write = db.begin_write().map_err(database_error)?;
+            let mut watermark = {
+                let table = write
+                    .open_table(JOURNAL_WATERMARK)
+                    .map_err(database_error)?;
+                table
+                    .get(LAST_DRAINED_SEQUENCE)
+                    .map_err(database_error)?
+                    .map_or(0, |value| value.value())
+            };
+            for journalled in &events {
+                // Skipping what is already taken is what makes a replayed
+                // drain harmless: the same rows arrive again after a crash
+                // that happened before the watermark moved.
+                if journalled.sequence <= watermark {
+                    continue;
+                }
+                insert_event_tx(&write, &StorageEvent::from_journal(journalled))?;
+                watermark = journalled.sequence;
+            }
+            {
+                let mut table = write
+                    .open_table(JOURNAL_WATERMARK)
+                    .map_err(database_error)?;
+                table
+                    .insert(LAST_DRAINED_SEQUENCE, &watermark)
+                    .map_err(database_error)?;
+            }
+            write.commit().map_err(database_error)?;
+            Ok(watermark)
         })
         .await?
     }

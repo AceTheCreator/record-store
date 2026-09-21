@@ -209,6 +209,7 @@ pub fn import_tx(
 
 #[cfg(test)]
 mod tests {
+    use record_store_core::WriteOrigin;
     use redb::ReadableDatabase;
     use tempfile::tempdir;
 
@@ -225,7 +226,9 @@ mod tests {
         let bucket_record = bucket("snapshot-bucket");
         repo.create_bucket(&bucket_record).await.expect("bucket");
         let stored = object(bucket_record.id, "nested/key", 42);
-        repo.put_object(&stored, None).await.expect("put");
+        repo.put_object(&stored, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
         let database = repo.database();
         let entries = tokio::task::spawn_blocking(move || {
             let read = database.begin_read().expect("begin");
@@ -280,11 +283,19 @@ mod tests {
             .await
             .expect("enable versioning");
         source
-            .put_object(&object(source_bucket.id, "a.txt", 10), None)
+            .put_object(
+                &object(source_bucket.id, "a.txt", 10),
+                None,
+                WriteOrigin::Direct,
+            )
             .await
             .expect("put");
         source
-            .put_object(&object(source_bucket.id, "b.txt", 20), None)
+            .put_object(
+                &object(source_bucket.id, "b.txt", 20),
+                None,
+                WriteOrigin::Direct,
+            )
             .await
             .expect("put");
         let upload_record = upload(source_bucket.id, "big.bin");
@@ -361,7 +372,11 @@ mod tests {
     async fn an_import_replaces_the_targets_existing_state() {
         let (source_directory, source, source_bucket) = catalog_with_bucket("kept").await;
         source
-            .put_object(&object(source_bucket.id, "kept.txt", 1), None)
+            .put_object(
+                &object(source_bucket.id, "kept.txt", 1),
+                None,
+                WriteOrigin::Direct,
+            )
             .await
             .expect("put");
         drop(source);
@@ -374,7 +389,11 @@ mod tests {
 
         let (target_directory, target, stale_bucket) = catalog_with_bucket("stale").await;
         target
-            .put_object(&object(stale_bucket.id, "stale.txt", 1), None)
+            .put_object(
+                &object(stale_bucket.id, "stale.txt", 1),
+                None,
+                WriteOrigin::Direct,
+            )
             .await
             .expect("put");
         drop(target);

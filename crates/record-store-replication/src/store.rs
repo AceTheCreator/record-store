@@ -19,7 +19,7 @@ use record_store_cluster::{
 use record_store_consensus::ClusterWrite;
 use record_store_core::{
     CoreError, DurabilityProfile, ETag, MultipartUploadState, ObjectId, ObjectMetadata,
-    ObjectVersionRecord, PayloadFormat, ReplicationProfile, UploadedPart, VersionId,
+    ObjectVersionRecord, PayloadFormat, ReplicationProfile, UploadedPart, VersionId, WriteOrigin,
 };
 use record_store_metadata::{
     DeleteObjectResult, MetadataCommand, MetadataError, NewDeleteMarker, ObjectCommitResult,
@@ -180,6 +180,7 @@ impl DistributedObjectStore {
         &self,
         metadata: &ObjectMetadata,
         object_lock: Option<record_store_core::ObjectLockState>,
+        origin: WriteOrigin,
         placement: &PayloadPlacement,
     ) -> Result<ObjectCommitResult, StorageError> {
         let consensus = self.context.consensus.as_ref().ok_or_else(|| {
@@ -189,6 +190,7 @@ impl DistributedObjectStore {
             ClusterWrite::metadata(MetadataCommand::PutObject {
                 metadata: Box::new(metadata.clone()),
                 object_lock,
+                origin,
             }),
             ClusterWrite::cluster(ClusterCommand::PutPlacement {
                 placement: Box::new(placement.clone()),
@@ -391,7 +393,7 @@ impl ObjectStore for DistributedObjectStore {
             modified_at: now,
         };
         let commit = match self
-            .commit_object(&metadata, request.object_lock, &placement)
+            .commit_object(&metadata, request.object_lock, request.origin, &placement)
             .await
         {
             Ok(commit) => commit,
@@ -628,7 +630,12 @@ impl ObjectStore for DistributedObjectStore {
             modified_at: now,
         };
         let commit = match self
-            .commit_object(&metadata, persisted.object_lock, &placement)
+            .commit_object(
+                &metadata,
+                persisted.object_lock,
+                WriteOrigin::MultipartCompletion,
+                &placement,
+            )
             .await
         {
             Ok(commit) => commit,

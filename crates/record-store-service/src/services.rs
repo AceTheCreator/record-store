@@ -7,7 +7,6 @@ use std::{
 
 use record_store_audit::AuditRepository;
 use record_store_core::{BucketId, OrganizationId};
-use record_store_events::EventRepository;
 use record_store_metadata::MetadataRepository;
 use record_store_storage::ObjectStore;
 use tokio::sync::{RwLock, Semaphore};
@@ -55,35 +54,28 @@ impl Services {
         owner: OrganizationId,
         limits: ServiceLimits,
     ) -> Self {
-        Self::new_with_events(storage, metadata, owner, limits, None)
-    }
-
-    /// Constructs services with an optional durable storage-event outbox.
-    #[must_use]
-    pub fn new_with_events(
-        storage: Arc<dyn ObjectStore>,
-        metadata: Arc<dyn MetadataRepository>,
-        owner: OrganizationId,
-        limits: ServiceLimits,
-        events: Option<Arc<dyn EventRepository>>,
-    ) -> Self {
-        Self::build(storage, metadata, owner, limits, events, None)
+        Self::build(storage, metadata, owner, limits, None)
     }
 
     /// Constructs services with a durable audit trail for Object Lock bypasses.
     ///
     /// A governance bypass is the one way a retained version leaves before its
     /// date, so the deployment that enables Object Lock wants it recorded.
+    ///
+    /// Storage events are not wired in here. They are journalled by the catalog
+    /// inside the transaction that commits each mutation, and moved into the
+    /// delivery outbox by [`crate::StorageEventPump`]; a service that published
+    /// them itself could only do so after the commit, which is the window that
+    /// loses them.
     #[must_use]
     pub fn new_with_audit(
         storage: Arc<dyn ObjectStore>,
         metadata: Arc<dyn MetadataRepository>,
         owner: OrganizationId,
         limits: ServiceLimits,
-        events: Option<Arc<dyn EventRepository>>,
         audit: Arc<dyn AuditRepository>,
     ) -> Self {
-        Self::build(storage, metadata, owner, limits, events, Some(audit))
+        Self::build(storage, metadata, owner, limits, Some(audit))
     }
 
     fn build(
@@ -91,7 +83,6 @@ impl Services {
         metadata: Arc<dyn MetadataRepository>,
         owner: OrganizationId,
         limits: ServiceLimits,
-        events: Option<Arc<dyn EventRepository>>,
         audit: Option<Arc<dyn AuditRepository>>,
     ) -> Self {
         let coordinator = Arc::new(BucketCoordinator::default());
@@ -108,7 +99,6 @@ impl Services {
                 operations: Arc::clone(&operations),
                 metrics: Arc::clone(&metrics),
                 owner,
-                events: events.clone(),
             }),
             objects: Arc::new(ObjectService {
                 storage,
@@ -118,7 +108,6 @@ impl Services {
                 metrics: Arc::clone(&metrics),
                 maximum_custom_metadata_entries: limits.maximum_custom_metadata_entries,
                 maximum_custom_metadata_bytes: limits.maximum_custom_metadata_bytes,
-                events,
                 policy: Arc::clone(&policy),
             }),
             locks: Arc::new(ObjectLockService {

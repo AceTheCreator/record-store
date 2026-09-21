@@ -5,9 +5,9 @@ use std::{path::Path, sync::Arc};
 use async_trait::async_trait;
 use record_store_core::{
     Bucket, BucketId, BucketName, BucketQuota, CorsConfiguration, LifecycleRule, LifecycleRuleId,
-    MultipartUpload, ObjectId, ObjectKey, ObjectLockConfiguration, ObjectLockState, ObjectMetadata,
-    ObjectVersionRecord, PartNumber, StorageUsage, UploadId, UploadedPart, VersionId,
-    VersioningState, open_database,
+    MultipartUpload, MutationEvent, ObjectId, ObjectKey, ObjectLockConfiguration, ObjectLockState,
+    ObjectMetadata, ObjectVersionRecord, PartNumber, StorageUsage, UploadId, UploadedPart,
+    VersionId, VersioningState, WriteOrigin, open_database,
 };
 use redb::{Database, ReadableDatabase, ReadableTable};
 
@@ -18,9 +18,9 @@ use crate::keys::{
 };
 use crate::schema::{
     BUCKET_COUNT, BUCKET_NAMES, BUCKET_USAGE, BUCKETS, CLEANUP, COUNTERS, LIFECYCLE_RULES,
-    LOGICAL_BYTES, MULTIPART, MULTIPART_BYTES, MULTIPART_ORDER, NULL_VERSIONS, OBJECT_COUNT,
-    OBJECT_LOCKS, OBJECTS, PARTS, PHYSICAL_BYTES, VERSION_BYTES, VERSION_COUNT, VERSION_ORDER,
-    VERSIONS, initialize_schema,
+    LOGICAL_BYTES, MULTIPART, MULTIPART_BYTES, MULTIPART_ORDER, MUTATION_EVENTS, NULL_VERSIONS,
+    OBJECT_COUNT, OBJECT_LOCKS, OBJECTS, PARTS, PHYSICAL_BYTES, VERSION_BYTES, VERSION_COUNT,
+    VERSION_ORDER, VERSIONS, initialize_schema,
 };
 use crate::tx::{
     current_version_read, decode_optional, read_counter, read_encoded, record_matches,
@@ -209,13 +209,51 @@ impl MetadataRepository for RedbMetadataRepository {
         &self,
         metadata: &ObjectMetadata,
         object_lock: Option<ObjectLockState>,
+        origin: WriteOrigin,
     ) -> Result<ObjectCommitResult, MetadataError> {
         self.command(MetadataCommand::PutObject {
             metadata: Box::new(metadata.clone()),
             object_lock,
+            origin,
         })
         .await?
         .into_object_commit()
+    }
+
+    async fn pending_mutation_events(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<MutationEvent>, MetadataError> {
+        let db = Arc::clone(&self.database);
+        let limit = limit.clamp(1, 10_000);
+        tokio::task::spawn_blocking(move || {
+            let read = db
+                .begin_read()
+                .map_err(|e| backend("begin read mutation events", e))?;
+            let table = read
+                .open_table(MUTATION_EVENTS)
+                .map_err(|e| backend("open mutation events", e))?;
+            let mut out = Vec::new();
+            for entry in table
+                .range(after.saturating_add(1)..)
+                .map_err(|e| backend("range mutation events", e))?
+            {
+                let (_, value) = entry.map_err(|e| backend("read mutation event", e))?;
+                out.push(serde_json::from_slice(value.value())?);
+                if out.len() >= limit {
+                    break;
+                }
+            }
+            Ok(out)
+        })
+        .await?
+    }
+
+    async fn prune_mutation_events(&self, through_sequence: u64) -> Result<(), MetadataError> {
+        self.command(MetadataCommand::PruneMutationEvents { through_sequence })
+            .await
+            .map(|_| ())
     }
 
     async fn get_object(
@@ -1013,8 +1051,12 @@ mod tests {
             .expect("enable");
         let first = object(bucket.id, "report", 10);
         let second = object(bucket.id, "report", 20);
-        repo.put_object(&first, None).await.expect("first");
-        repo.put_object(&second, None).await.expect("second");
+        repo.put_object(&first, None, WriteOrigin::Direct)
+            .await
+            .expect("first");
+        repo.put_object(&second, None, WriteOrigin::Direct)
+            .await
+            .expect("second");
         repo.delete_object(bucket.id, &first.key, NewDeleteMarker::generate())
             .await
             .expect("delete");
@@ -1166,7 +1208,7 @@ mod tests {
     async fn a_bucket_holding_objects_cannot_be_deleted() {
         let (_directory, catalog, bucket) = catalog_with_bucket("photos").await;
         catalog
-            .put_object(&object(bucket.id, "a.txt", 10), None)
+            .put_object(&object(bucket.id, "a.txt", 10), None, WriteOrigin::Direct)
             .await
             .expect("put");
 
@@ -1232,7 +1274,7 @@ mod tests {
         let (_directory, catalog, bucket) = catalog_with_bucket("photos").await;
         for key in ["a/1", "a/2", "a/3", "b/1"] {
             catalog
-                .put_object(&object(bucket.id, key, 1), None)
+                .put_object(&object(bucket.id, key, 1), None, WriteOrigin::Direct)
                 .await
                 .expect("put");
         }
@@ -1286,11 +1328,11 @@ mod tests {
         assert_eq!(summary.logical_bytes, 0);
 
         catalog
-            .put_object(&object(bucket.id, "a.txt", 512), None)
+            .put_object(&object(bucket.id, "a.txt", 512), None, WriteOrigin::Direct)
             .await
             .expect("put");
         catalog
-            .put_object(&object(bucket.id, "b.txt", 512), None)
+            .put_object(&object(bucket.id, "b.txt", 512), None, WriteOrigin::Direct)
             .await
             .expect("put");
 
@@ -1433,7 +1475,10 @@ mod tests {
     async fn deleted_payloads_are_queued_for_cleanup_once_unreferenced() {
         let (_directory, catalog, bucket) = catalog_with_bucket("photos").await;
         let stored = object(bucket.id, "a.txt", 64);
-        catalog.put_object(&stored, None).await.expect("put");
+        catalog
+            .put_object(&stored, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
         assert!(
             catalog
                 .payload_referenced(stored.id)
@@ -1480,8 +1525,14 @@ mod tests {
         let key = ObjectKey::new("note.txt").expect("key");
         let first = object(bucket.id, "note.txt", 3);
         let second = object(bucket.id, "note.txt", 5);
-        catalog.put_object(&first, None).await.expect("put");
-        catalog.put_object(&second, None).await.expect("put");
+        catalog
+            .put_object(&first, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
+        catalog
+            .put_object(&second, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
 
         assert_eq!(
             catalog
@@ -1545,8 +1596,14 @@ mod tests {
         let key = ObjectKey::new("note.txt").expect("key");
         let first = object(bucket.id, "note.txt", 3);
         let second = object(bucket.id, "note.txt", 5);
-        catalog.put_object(&first, None).await.expect("put");
-        catalog.put_object(&second, None).await.expect("put");
+        catalog
+            .put_object(&first, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
+        catalog
+            .put_object(&second, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
 
         let removed = catalog
             .delete_object_version(
@@ -1600,7 +1657,10 @@ mod tests {
             .expect("enable");
         let key = ObjectKey::new("note.txt").expect("key");
         let versioned = object(bucket.id, "note.txt", 3);
-        catalog.put_object(&versioned, None).await.expect("put");
+        catalog
+            .put_object(&versioned, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
 
         catalog
             .set_bucket_versioning(bucket.id, VersioningState::Suspended)
@@ -1608,8 +1668,14 @@ mod tests {
             .expect("suspend");
         let first_null = object(bucket.id, "note.txt", 5);
         let second_null = object(bucket.id, "note.txt", 7);
-        catalog.put_object(&first_null, None).await.expect("put");
-        catalog.put_object(&second_null, None).await.expect("put");
+        catalog
+            .put_object(&first_null, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
+        catalog
+            .put_object(&second_null, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
 
         assert!(
             catalog
@@ -1639,7 +1705,7 @@ mod tests {
             .expect("enable");
         for _ in 0..3 {
             catalog
-                .put_object(&object(bucket.id, "note.txt", 1), None)
+                .put_object(&object(bucket.id, "note.txt", 1), None, WriteOrigin::Direct)
                 .await
                 .expect("put");
         }
@@ -1682,8 +1748,14 @@ mod tests {
         let key = ObjectKey::new("note.txt").expect("key");
         let first = object(bucket.id, "note.txt", 3);
         let second = object(bucket.id, "note.txt", 5);
-        catalog.put_object(&first, None).await.expect("put");
-        catalog.put_object(&second, None).await.expect("put");
+        catalog
+            .put_object(&first, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
+        catalog
+            .put_object(&second, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
 
         assert!(catalog.payload_referenced(first.id).await.expect("read"));
         assert!(catalog.payload_referenced(second.id).await.expect("read"));
@@ -1835,12 +1907,20 @@ mod tests {
             .expect("set quota");
 
         catalog
-            .put_object(&object(bucket.id, "small.txt", 60), None)
+            .put_object(
+                &object(bucket.id, "small.txt", 60),
+                None,
+                WriteOrigin::Direct,
+            )
             .await
             .expect("a write inside the budget is accepted");
         assert!(matches!(
             catalog
-                .put_object(&object(bucket.id, "large.txt", 60), None)
+                .put_object(
+                    &object(bucket.id, "large.txt", 60),
+                    None,
+                    WriteOrigin::Direct
+                )
                 .await,
             Err(MetadataError::QuotaExceeded)
         ));
@@ -1861,12 +1941,20 @@ mod tests {
             .expect("set quota");
 
         catalog
-            .put_object(&object(bucket.id, "first.txt", 1), None)
+            .put_object(
+                &object(bucket.id, "first.txt", 1),
+                None,
+                WriteOrigin::Direct,
+            )
             .await
             .expect("first");
         assert!(matches!(
             catalog
-                .put_object(&object(bucket.id, "second.txt", 1), None)
+                .put_object(
+                    &object(bucket.id, "second.txt", 1),
+                    None,
+                    WriteOrigin::Direct
+                )
                 .await,
             Err(MetadataError::QuotaExceeded)
         ));
@@ -1878,7 +1966,7 @@ mod tests {
     async fn a_quota_below_current_usage_is_refused() {
         let (_directory, catalog, bucket) = catalog_with_bucket("occupied").await;
         catalog
-            .put_object(&object(bucket.id, "a.txt", 500), None)
+            .put_object(&object(bucket.id, "a.txt", 500), None, WriteOrigin::Direct)
             .await
             .expect("put");
 
@@ -2009,7 +2097,7 @@ mod tests {
         let key = ObjectKey::new("note.txt").expect("key");
 
         catalog
-            .put_object(&object(bucket.id, "note.txt", 3), None)
+            .put_object(&object(bucket.id, "note.txt", 3), None, WriteOrigin::Direct)
             .await
             .expect("put");
         catalog
@@ -2025,7 +2113,10 @@ mod tests {
         );
 
         let revived = object(bucket.id, "note.txt", 7);
-        catalog.put_object(&revived, None).await.expect("put");
+        catalog
+            .put_object(&revived, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
         assert_eq!(
             catalog
                 .get_object(bucket.id, &key)
@@ -2065,8 +2156,14 @@ mod tests {
         let key = ObjectKey::new("note.txt").expect("key");
         let first = object(bucket.id, "note.txt", 3);
         let second = object(bucket.id, "note.txt", 5);
-        catalog.put_object(&first, None).await.expect("put");
-        catalog.put_object(&second, None).await.expect("put");
+        catalog
+            .put_object(&first, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
+        catalog
+            .put_object(&second, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
 
         catalog
             .delete_object_version(
@@ -2102,8 +2199,14 @@ mod tests {
         let key = ObjectKey::new("note.txt").expect("key");
         let first = object(bucket.id, "note.txt", 100);
         let second = object(bucket.id, "note.txt", 200);
-        catalog.put_object(&first, None).await.expect("put");
-        catalog.put_object(&second, None).await.expect("put");
+        catalog
+            .put_object(&first, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
+        catalog
+            .put_object(&second, None, WriteOrigin::Direct)
+            .await
+            .expect("put");
 
         let usage = catalog.bucket_usage().await.expect("usage");
         let before = usage.get(&bucket.id).expect("summary");
@@ -2137,7 +2240,7 @@ mod tests {
             .expect("enable");
         for key in ["a", "b", "c"] {
             catalog
-                .put_object(&object(bucket.id, key, 1), None)
+                .put_object(&object(bucket.id, key, 1), None, WriteOrigin::Direct)
                 .await
                 .expect("put");
         }

@@ -66,6 +66,7 @@ pub(crate) struct PartialServerConfig {
     rpc_bind: Option<SocketAddr>,
     rpc_advertise: Option<String>,
     shutdown_grace_period_seconds: Option<u64>,
+    trusted_proxies: Option<Vec<String>>,
 }
 
 impl PartialServerConfig {
@@ -87,6 +88,9 @@ impl PartialServerConfig {
         }
         if let Some(value) = self.shutdown_grace_period_seconds {
             target.shutdown_grace_period_seconds = value;
+        }
+        if let Some(value) = self.trusted_proxies {
+            target.trusted_proxies = value;
         }
     }
 }

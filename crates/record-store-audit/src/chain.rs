@@ -110,6 +110,14 @@ pub enum RecordVerdict {
     BrokenLink,
     /// The record predates the chain and carries no links.
     Unchained,
+    /// No record occupies this position, though the log runs past it.
+    ///
+    /// Never returned by [`AuditRecord::verify_against`], which is handed a
+    /// record: it is a verdict about a *position*, reached by a walk that finds
+    /// the sequence empty. Deletion is the one tampering the links alone cannot
+    /// describe — the record that would have carried the broken link is the one
+    /// that is gone — so the gapless sequence is what catches it.
+    Missing,
 }
 
 impl RecordVerdict {
@@ -121,6 +129,7 @@ impl RecordVerdict {
             Self::ContentChanged => "content changed",
             Self::BrokenLink => "broken link to the previous record",
             Self::Unchained => "predates the hash chain",
+            Self::Missing => "record is missing from the log",
         }
     }
 }

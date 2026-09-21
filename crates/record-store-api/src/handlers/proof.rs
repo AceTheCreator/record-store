@@ -82,14 +82,19 @@ pub(crate) async fn object_proof(
         payload: PayloadDigest {
             sha256: payload_sha256(&metadata),
         },
-        // The audit chain is not maintained yet, so there is no history to
-        // include and the bundle says so in the document rather than leaving
-        // the section out. A missing section reads as "nothing happened";
-        // this reads as "this was not checked".
+        // The audit log is chained, but nothing checkpoints it yet, and a
+        // bundle's history section exists to carry a root and an inclusion
+        // path. Saying so in the document is deliberate: a missing section
+        // reads as "nothing happened", where this reads as "this was not
+        // established, and here is precisely what is missing".
         history: History::Unavailable {
-            reason: HistoryUnavailable::ChainNotEnabled,
-            detail: "this deployment does not yet maintain a tamper-evident audit chain, \
-                     so no audit records, checkpoint root, or anchor receipt are included"
+            reason: HistoryUnavailable::NotYetCheckpointed,
+            detail: "this deployment maintains a hash-chained audit log, which detects a \
+                     record edited or removed by anyone who cannot rewrite every later \
+                     link. It does not yet produce checkpoints or external anchors, so \
+                     no Merkle root and no inclusion path can be included here, and this \
+                     bundle establishes nothing against an operator who rewrote the whole \
+                     log. Verify the chain directly with GET /api/v1/audit/chain."
                 .to_owned(),
         },
         deployment: Deployment {

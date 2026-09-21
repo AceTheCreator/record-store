@@ -206,6 +206,15 @@ impl Config {
         {
             self.sharing.embed_base_url = Some(value.to_owned());
         }
+        if let Some(value) = environment_value(environment, "RECORD_STORE_SERVER_TRUSTED_PROXIES")?
+        {
+            self.server.trusted_proxies = value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
         if let Some(value) = environment_value(environment, "RECORD_STORE_CLUSTER_SEEDS")? {
             self.cluster.seeds = value
                 .split(',')
@@ -435,6 +444,10 @@ mod exhaustive_tests {
             ("RECORD_STORE_RPC_ADVERTISE", "node-a:17603".into()),
             ("RECORD_STORE_API_BIND", "127.0.0.1:17601".into()),
             ("RECORD_STORE_SHUTDOWN_TIMEOUT_SECONDS", "45".into()),
+            (
+                "RECORD_STORE_SERVER_TRUSTED_PROXIES",
+                "10.0.0.0/8, 192.168.1.5".into(),
+            ),
             ("RECORD_STORE_STORAGE_DATA_DIRECTORY", "/srv/records".into()),
             (
                 "RECORD_STORE_STORAGE_TEMPORARY_DIRECTORY",
@@ -641,6 +654,10 @@ mod exhaustive_tests {
             Some("https://embed.example")
         );
 
+        assert_eq!(
+            config.server.trusted_proxies,
+            vec!["10.0.0.0/8".to_owned(), "192.168.1.5".to_owned()]
+        );
         assert_eq!(config.cluster.seeds, vec!["node-b:17603".to_owned()]);
         assert!(config.cluster.join_token.is_some());
         assert_eq!(config.cluster.storage_class, "standard");

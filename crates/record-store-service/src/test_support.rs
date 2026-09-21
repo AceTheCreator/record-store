@@ -85,7 +85,6 @@ pub(crate) async fn services_with_audit() -> (
             maximum_custom_metadata_bytes: 1_024,
             object_lock: crate::ObjectLockLimits::default(),
         },
-        None,
         audit.clone(),
     );
     (directory, services, audit)

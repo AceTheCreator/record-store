@@ -292,7 +292,12 @@ export type Policy = {
   readonly updated_at: string;
 };
 
-export type AuditResult = 'success' | 'denied' | 'failure';
+/**
+ * `attempted` is not an outcome but the absence of one: the record written
+ * before a change is made. A record that stays `attempted` is an operation the
+ * server cannot account for.
+ */
+export type AuditResult = 'attempted' | 'success' | 'denied' | 'failure';
 
 export type AuditEvent = {
   readonly event_id: string;
@@ -311,6 +316,14 @@ export type AuditPage = {
   readonly events: readonly AuditEvent[];
   readonly next_time: string | null;
   readonly next_id: string | null;
+  /**
+   * The server stopped scanning before reaching the end of the range.
+   *
+   * A filtered query scans rather than indexing and gives up after a bounded
+   * number of records, so a short or empty page does not mean the range holds
+   * nothing more. Follow the cursor.
+   */
+  readonly scan_truncated: boolean;
 };
 
 export type StorageEventType =

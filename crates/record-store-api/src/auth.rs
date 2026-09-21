@@ -258,6 +258,9 @@ impl ManagementPrincipal {
                         // Exporting the trail and reading what is retained are
                         // the questions an auditor exists to ask.
                         || path.starts_with("/api/v1/audit/export")
+                        // Checking the trail has not been edited is the
+                        // auditor's question above all others.
+                        || path == "/api/v1/audit/chain"
                         || path == "/api/v1/reports/retention"
                         || path == "/api/v1/storage/status"
                         || path == "/api/v1/storage/usage"

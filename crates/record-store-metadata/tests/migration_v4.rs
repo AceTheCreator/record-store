@@ -281,7 +281,7 @@ async fn a_schema_four_directory_starts_migrates_and_serves_every_object_unchang
                 .value(),
             METADATA_SCHEMA_VERSION
         );
-        assert_eq!(METADATA_SCHEMA_VERSION, 5);
+        assert_eq!(METADATA_SCHEMA_VERSION, 6);
         assert!(
             read.open_table(TableDefinition::<&[u8], &[u8]>::new("object_locks.v1"))
                 .is_ok(),
@@ -291,6 +291,11 @@ async fn a_schema_four_directory_starts_migrates_and_serves_every_object_unchang
             read.open_table(TableDefinition::<&str, i64>::new("clock.v1"))
                 .is_ok(),
             "migration creates the clock table"
+        );
+        assert!(
+            read.open_table(TableDefinition::<u64, &[u8]>::new("mutation_events.v1"))
+                .is_ok(),
+            "migration creates the storage-event journal"
         );
     }
 

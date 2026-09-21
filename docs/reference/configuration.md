@@ -33,11 +33,20 @@ empty, TOML is the only way to set it. See
 | `s3_bind` | socket address | `0.0.0.0:7600` | `RECORD_STORE_S3_BIND` |
 | `api_bind` | socket address | `0.0.0.0:7601` | `RECORD_STORE_API_BIND` |
 | `shutdown_grace_period_seconds` | integer 1–300 | `30` | `RECORD_STORE_SHUTDOWN_TIMEOUT_SECONDS` |
+| `trusted_proxies` | list of IPs or CIDR blocks, at most 64 | `[]` | `RECORD_STORE_SERVER_TRUSTED_PROXIES` (comma-separated) |
 
 Constraints:
 
 - The listeners must differ from each other.
 - None may use port `7602`, which is reserved for the web console.
+- Every `trusted_proxies` entry must parse as an IP address or CIDR block; a
+  malformed entry stops start-up rather than being ignored.
+
+`trusted_proxies` names the reverse-proxy hops whose `X-Forwarded-For` header may be
+believed. While it is empty the header is ignored entirely and every request is
+attributed to the socket it arrived on — safe everywhere, and behind a proxy it means
+rate limits and audit records all name the proxy. See
+[Reverse Proxy and TLS](../deployment/reverse-proxy.md#client-address-headers).
 
 `api_bind` is unrestricted administrative access. Do not publish it. See
 [Ports](ports.md).
@@ -186,6 +195,9 @@ not from the file.
 s3_bind = "0.0.0.0:7600"
 api_bind = "127.0.0.1:7601"
 shutdown_grace_period_seconds = 30
+# The proxy in front of this deployment, so per-visitor rate limits and audit
+# records name the caller rather than the proxy.
+trusted_proxies = ["10.0.0.0/8"]
 
 [storage]
 data_directory = "/var/lib/record-store"

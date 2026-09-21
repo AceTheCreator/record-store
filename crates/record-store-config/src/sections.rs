@@ -6,6 +6,7 @@ use std::{
     path::PathBuf,
 };
 
+use record_store_core::{CoreError, TrustedProxies};
 use serde::Deserialize;
 
 use crate::*;
@@ -32,11 +33,34 @@ pub struct ServerConfig {
     pub rpc_advertise: Option<String>,
     /// Maximum graceful-shutdown drain time.
     pub shutdown_grace_period_seconds: u64,
+    /// Reverse-proxy hops whose `X-Forwarded-For` header may be believed.
+    ///
+    /// Addresses or CIDR blocks, for example `10.0.0.0/8`. Empty by default,
+    /// which means the header is ignored and every request is attributed to
+    /// the socket it arrived on. That is the safe default and the wrong one
+    /// behind a proxy: until a hop is named here, every visitor arriving
+    /// through it shares one identity, and abuse controls and audit records
+    /// say the proxy's address rather than the caller's.
+    ///
+    /// Naming a hop that is not actually in front of Record Store hands
+    /// anybody who can reach the listener from that address the ability to
+    /// choose their own identity, so the list should contain the proxy and
+    /// nothing else.
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
 }
 
 impl ServerConfig {
     /// Port reserved for the future web console. Nothing binds it today.
     pub const RESERVED_CONSOLE_PORT: u16 = 7_602;
+
+    /// Returns the parsed trusted-proxy policy.
+    ///
+    /// Parsing here rather than at use time means a malformed entry is a
+    /// start-up failure, not a silent decision to trust nothing.
+    pub fn parsed_trusted_proxies(&self) -> Result<TrustedProxies, CoreError> {
+        TrustedProxies::parse(&self.trusted_proxies)
+    }
 
     /// Returns the address peers should use for internal RPC.
     ///
@@ -59,6 +83,7 @@ impl Default for ServerConfig {
             rpc_bind: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 7_603)),
             rpc_advertise: None,
             shutdown_grace_period_seconds: 30,
+            trusted_proxies: Vec::new(),
         }
     }
 }

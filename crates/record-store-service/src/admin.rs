@@ -6,8 +6,9 @@ use std::{
 };
 
 use futures_util::TryStreamExt;
-use record_store_core::{Bucket, BucketName, ObjectKey, ObjectMetadata, StorageUsage, VersionId};
-use record_store_events::{StorageEvent, StorageEventType};
+use record_store_core::{
+    Bucket, BucketName, ObjectKey, ObjectMetadata, StorageUsage, VersionId, WriteOrigin,
+};
 use record_store_metadata::ListObjectsRequest as MetadataListRequest;
 use record_store_storage::{
     GetObjectRequest, GetObjectVersionRequest, PutObjectRequest, PutObjectResult,
@@ -16,27 +17,29 @@ use record_store_storage::{
 };
 
 use crate::error::map_storage;
-use crate::events::publish_event;
 use crate::*;
 
 impl ObjectService {
     /// Streams a server-side copy without buffering payload bytes.
     pub async fn copy(&self, request: ServiceCopyRequest) -> Result<PutObjectResult, ServiceError> {
+        self.copy_with_origin(request, WriteOrigin::Copy).await
+    }
+
+    /// Streams a copy, saying why it is being made.
+    ///
+    /// A restore is a copy of a historical version over the current one, and
+    /// the bytes reaching the catalog are identical either way. The origin is
+    /// what keeps the two distinguishable in the events subscribers receive.
+    async fn copy_with_origin(
+        &self,
+        request: ServiceCopyRequest,
+        origin: WriteOrigin,
+    ) -> Result<PutObjectResult, ServiceError> {
         self.metrics.requests.fetch_add(1, Ordering::Relaxed);
         self.validate_custom_metadata(&request.replacement_metadata)?;
         let _permit = self.acquire().await?;
         let source_bucket = self.resolve_bucket(&request.source_bucket).await?;
         let destination_bucket = self.resolve_bucket(&request.destination_bucket).await?;
-        let event_type = if self
-            .metadata
-            .get_object(destination_bucket.id, &request.destination_key)
-            .await?
-            .is_some()
-        {
-            StorageEventType::ObjectUpdated
-        } else {
-            StorageEventType::ObjectCreated
-        };
         let source = if let Some(version_id) = request.source_version_id {
             self.storage
                 .get_version(GetObjectVersionRequest {
@@ -81,6 +84,7 @@ impl ObjectService {
                 // write. The source version's lock is not carried over: it
                 // protects that version, not this new one.
                 object_lock: ObjectLockService::initial_state(&destination_bucket, None)?,
+                origin,
                 body: upload_stream(body),
             })
             .await
@@ -88,15 +92,6 @@ impl ObjectService {
         self.metrics
             .upload_bytes
             .fetch_add(result.metadata.size, Ordering::Relaxed);
-        publish_event(
-            &self.events,
-            StorageEvent::new(event_type, destination_bucket.name.as_str()).object(
-                request.destination_key.as_str(),
-                Some(result.metadata.version_id),
-                Some(result.metadata.size),
-            ),
-        )
-        .await;
         Ok(result)
     }
 
@@ -108,26 +103,20 @@ impl ObjectService {
         version_id: VersionId,
     ) -> Result<PutObjectResult, ServiceError> {
         let result = self
-            .copy(ServiceCopyRequest {
-                source_bucket: bucket_name.clone(),
-                source_key: key.clone(),
-                source_version_id: Some(version_id),
-                destination_bucket: bucket_name.clone(),
-                destination_key: key,
-                metadata_directive: CopyMetadataDirective::Copy,
-                content_type: None,
-                replacement_metadata: Default::default(),
-            })
+            .copy_with_origin(
+                ServiceCopyRequest {
+                    source_bucket: bucket_name.clone(),
+                    source_key: key.clone(),
+                    source_version_id: Some(version_id),
+                    destination_bucket: bucket_name.clone(),
+                    destination_key: key,
+                    metadata_directive: CopyMetadataDirective::Copy,
+                    content_type: None,
+                    replacement_metadata: Default::default(),
+                },
+                WriteOrigin::Restore,
+            )
             .await?;
-        publish_event(
-            &self.events,
-            StorageEvent::new(StorageEventType::ObjectRestored, bucket_name.as_str()).object(
-                result.metadata.key.as_str(),
-                Some(result.metadata.version_id),
-                Some(result.metadata.size),
-            ),
-        )
-        .await;
         Ok(result)
     }
 

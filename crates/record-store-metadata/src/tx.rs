@@ -2,8 +2,8 @@
 
 use chrono::{DateTime, Duration, Utc};
 use record_store_core::{
-    Bucket, BucketId, DeleteMarker, ObjectId, ObjectKey, ObjectLockState, ObjectMetadata,
-    ObjectVersionRecord, UploadId, UploadedPart, VersionId,
+    Bucket, BucketId, DeleteMarker, MutationEvent, ObjectId, ObjectKey, ObjectLockState,
+    ObjectMetadata, ObjectVersionRecord, StorageEventType, UploadId, UploadedPart, VersionId,
 };
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::de::DeserializeOwned;
@@ -14,7 +14,8 @@ use crate::keys::{
 };
 use crate::schema::{
     BUCKET_NAMES, BUCKET_USAGE, BUCKETS, CLEANUP, CLOCK, CLOCK_WATERMARK, COUNTERS, MARKERS,
-    MULTIPART_ORDER, NULL_VERSIONS, OBJECT_LOCKS, OBJECTS, PARTS, VERSION_ORDER, VERSIONS,
+    MULTIPART_ORDER, MUTATION_EVENT_SEQUENCE, MUTATION_EVENTS, NULL_VERSIONS, OBJECT_LOCKS,
+    OBJECTS, PARTS, VERSION_ORDER, VERSIONS,
 };
 use crate::types::BucketUsage;
 use crate::*;
@@ -568,4 +569,81 @@ pub(crate) fn enforce_deletable(
         return Ok(());
     }
     Err(MetadataError::VersionLocked(block))
+}
+
+/// Records a storage event the mutation being committed owes its subscribers.
+///
+/// Called from inside the transaction that commits the mutation, which is the
+/// whole point: the change and the obligation to announce it become durable
+/// together, so no crash can produce one without the other. Nothing here talks
+/// to a subscriber — draining the journal into the outbox is a separate step
+/// that can be retried, and retrying it republishes the same event because the
+/// identifier is allocated here and not there.
+pub(crate) fn journal_event(
+    write: &redb::WriteTransaction,
+    event_type: StorageEventType,
+    bucket: &str,
+    key: Option<&ObjectKey>,
+    version_id: Option<VersionId>,
+    size: Option<u64>,
+    occurred_at: DateTime<Utc>,
+) -> Result<(), MetadataError> {
+    let sequence = {
+        let mut counters = write
+            .open_table(COUNTERS)
+            .map_err(|e| backend("open counters", e))?;
+        let next = read_counter(&counters, MUTATION_EVENT_SEQUENCE)?
+            .checked_add(1)
+            .ok_or_else(counter_error)?;
+        counters
+            .insert(MUTATION_EVENT_SEQUENCE, &next)
+            .map_err(|e| backend("advance event sequence", e))?;
+        next
+    };
+    let event = MutationEvent {
+        sequence,
+        event_id: record_store_core::EventId::new(),
+        event_type,
+        occurred_at,
+        bucket: bucket.to_owned(),
+        key: key.map(|key| key.to_string()),
+        version_id,
+        size,
+    };
+    let bytes = serde_json::to_vec(&event)?;
+    let mut table = write
+        .open_table(MUTATION_EVENTS)
+        .map_err(|e| backend("open mutation events", e))?;
+    table
+        .insert(sequence, bytes.as_slice())
+        .map_err(|e| backend("journal mutation event", e))?;
+    Ok(())
+}
+
+/// Removes journal rows the outbox has already taken.
+///
+/// Returns how many rows were removed. Pruning is a mutation of the catalog
+/// like any other, so in a replicated deployment it goes through the same
+/// ordered path and every member's journal is pruned to the same point.
+pub(crate) fn prune_mutation_events_tx(
+    write: &redb::WriteTransaction,
+    through_sequence: u64,
+) -> Result<u64, MetadataError> {
+    let mut table = write
+        .open_table(MUTATION_EVENTS)
+        .map_err(|e| backend("open mutation events", e))?;
+    let mut removed = 0_u64;
+    let doomed: Vec<u64> = table
+        .range(..=through_sequence)
+        .map_err(|e| backend("range mutation events", e))?
+        .map(|entry| entry.map(|(key, _)| key.value()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| backend("read mutation event", e))?;
+    for sequence in doomed {
+        table
+            .remove(sequence)
+            .map_err(|e| backend("prune mutation event", e))?;
+        removed = removed.saturating_add(1);
+    }
+    Ok(removed)
 }

@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use record_store_core::{
     Bucket, BucketId, BucketName, BucketQuota, CorsConfiguration, DeleteMarker, LifecycleRule,
     LifecycleRuleId, MultipartUpload, MultipartUploadState, ObjectId, ObjectKey,
-    ObjectLockConfiguration, ObjectLockState, ObjectMetadata, ObjectVersionRecord, UploadId,
-    UploadedPart, VersionId, VersioningState,
+    ObjectLockConfiguration, ObjectLockState, ObjectMetadata, ObjectVersionRecord,
+    StorageEventType, UploadId, UploadedPart, VersionId, VersioningState, WriteOrigin,
 };
 use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
@@ -19,10 +19,10 @@ use crate::schema::{
 };
 use crate::tx::{
     LockRelease, adjust_counter, as_object, clear_null, current_version, enforce_deletable,
-    has_multipart, insert_version, latest_version, list_parts_tx, observe_clock, publish_current,
-    queue_cleanup, read_bucket, read_bucket_usage, read_object_lock, read_tx, record_matches,
-    remove_current, remove_object_lock, remove_version, set_null, take_null, update_bucket_tx,
-    write_bucket_usage, write_object_lock,
+    has_multipart, insert_version, journal_event, latest_version, list_parts_tx, observe_clock,
+    prune_mutation_events_tx, publish_current, queue_cleanup, read_bucket, read_bucket_usage,
+    read_object_lock, read_tx, record_matches, remove_current, remove_object_lock, remove_version,
+    set_null, take_null, update_bucket_tx, write_bucket_usage, write_object_lock,
 };
 use crate::types::BucketUsage;
 use crate::*;
@@ -106,6 +106,15 @@ pub enum MetadataCommand {
         /// a crash cannot leave a version that was written under retention
         /// durably unretained.
         object_lock: Option<ObjectLockState>,
+        /// Why this version is being written.
+        ///
+        /// A copy, a restore, and a completed multipart upload all publish a
+        /// version and are indistinguishable once they arrive, but they are
+        /// different events to a subscriber. The caller knows which it is, so
+        /// it says; defaulted so a command written before origins existed still
+        /// decodes as the ordinary upload it was.
+        #[serde(default)]
+        origin: WriteOrigin,
     },
     /// Apply ordinary delete semantics for the current version of a key.
     DeleteObject {
@@ -189,6 +198,14 @@ pub enum MetadataCommand {
         /// Payload identifier.
         object_id: ObjectId,
     },
+    /// Drop journalled storage events an outbox has already taken.
+    ///
+    /// A catalog mutation like any other, so a replicated deployment prunes
+    /// every member's journal to the same point rather than letting them drift.
+    PruneMutationEvents {
+        /// Highest sequence that may be removed, inclusive.
+        through_sequence: u64,
+    },
 }
 
 impl MetadataCommand {
@@ -216,6 +233,7 @@ impl MetadataCommand {
             Self::PutLifecycleRule { .. } => "put_lifecycle_rule",
             Self::DeleteLifecycleRule { .. } => "delete_lifecycle_rule",
             Self::CompleteCleanup { .. } => "complete_cleanup",
+            Self::PruneMutationEvents { .. } => "prune_mutation_events",
         }
     }
 }
@@ -405,10 +423,12 @@ pub fn apply_command_tx(
         MetadataCommand::PutObject {
             metadata,
             object_lock,
+            origin,
         } => Ok(MetadataOutcome::ObjectCommit(put_object_tx(
             write,
             &metadata,
             object_lock,
+            origin,
         )?)),
         MetadataCommand::DeleteObject {
             bucket_id,
@@ -472,6 +492,10 @@ pub fn apply_command_tx(
             complete_cleanup_tx(write, object_id)?;
             Ok(MetadataOutcome::None)
         }
+        MetadataCommand::PruneMutationEvents { through_sequence } => {
+            prune_mutation_events_tx(write, through_sequence)?;
+            Ok(MetadataOutcome::None)
+        }
     }
 }
 
@@ -528,6 +552,15 @@ pub(crate) fn create_bucket_tx(
             .map_err(|e| backend("index bucket", e))?;
     }
     write_bucket_usage(write, bucket.id, BucketUsage::default())?;
+    journal_event(
+        write,
+        StorageEventType::BucketCreated,
+        bucket.name.as_str(),
+        None,
+        None,
+        None,
+        bucket.created_at,
+    )?;
     adjust_counter(write, BUCKET_COUNT, 1)
 }
 
@@ -595,6 +628,15 @@ pub(crate) fn delete_bucket_tx(
         }
     }
     adjust_counter(write, BUCKET_COUNT, -1)?;
+    journal_event(
+        write,
+        StorageEventType::BucketDeleted,
+        bucket.name.as_str(),
+        None,
+        None,
+        None,
+        Utc::now(),
+    )?;
     Ok(bucket)
 }
 
@@ -602,6 +644,7 @@ pub(crate) fn put_object_tx(
     write: &redb::WriteTransaction,
     metadata: &ObjectMetadata,
     object_lock: Option<ObjectLockState>,
+    origin: WriteOrigin,
 ) -> Result<ObjectCommitResult, MetadataError> {
     let bucket = read_bucket(write, metadata.bucket_id)?.ok_or(MetadataError::BucketNotFound)?;
     let key = object_key(metadata.bucket_id, &metadata.key);
@@ -709,6 +752,33 @@ pub(crate) fn put_object_tx(
     for old in &cleanup {
         queue_cleanup(write, old.id)?;
     }
+    // Whether this is a creation or an update is known here, inside the
+    // transaction, from the object that was actually replaced. Asking before
+    // the write — which is what a caller would have to do — answers a question
+    // about a moment that has already passed.
+    let created_or_updated = if previous.is_none() {
+        StorageEventType::ObjectCreated
+    } else {
+        StorageEventType::ObjectUpdated
+    };
+    let journalled = match origin {
+        WriteOrigin::MultipartCompletion => vec![StorageEventType::MultipartCompleted],
+        // A restore publishes a version *and* is a restore. Both events are
+        // emitted because both are true and subscribers already receive both.
+        WriteOrigin::Restore => vec![created_or_updated, StorageEventType::ObjectRestored],
+        WriteOrigin::Direct | WriteOrigin::Copy => vec![created_or_updated],
+    };
+    for event_type in journalled {
+        journal_event(
+            write,
+            event_type,
+            bucket.name.as_str(),
+            Some(&metadata.key),
+            Some(metadata.version_id),
+            Some(metadata.size),
+            metadata.created_at,
+        )?;
+    }
     Ok(ObjectCommitResult { cleanup })
 }
 
@@ -803,6 +873,23 @@ pub(crate) fn delete_object_tx(
         adjust_counter(write, LOGICAL_BYTES, -i128::from(metadata.size))?;
     }
     write_bucket_usage(write, bucket, usage)?;
+    // A delete against a key that was already absent changes nothing, so it
+    // owes nothing: announcing it would tell subscribers about a mutation that
+    // did not happen.
+    if result.previously_visible || result.delete_marker.is_some() {
+        journal_event(
+            write,
+            StorageEventType::ObjectDeleted,
+            bucket_record.name.as_str(),
+            Some(object_key_value),
+            result
+                .delete_marker
+                .as_ref()
+                .map(|marker| marker.version_id),
+            None,
+            marker_values.created_at,
+        )?;
+    }
     Ok(result)
 }
 
@@ -866,6 +953,17 @@ pub(crate) fn delete_object_version_tx(
         }
     }
     write_bucket_usage(write, bucket, usage)?;
+    if let Some(bucket_record) = read_bucket(write, bucket)? {
+        journal_event(
+            write,
+            StorageEventType::ObjectDeleted,
+            bucket_record.name.as_str(),
+            Some(object_key_value),
+            Some(version),
+            None,
+            release.observed_at,
+        )?;
+    }
     Ok(Some(DeleteVersionResult {
         removed: record,
         cleanup,
@@ -1116,6 +1214,20 @@ pub(crate) fn remove_multipart_tx(
     for part in &parts {
         queue_cleanup(write, part.object_id)?;
     }
+    // A completion's event belongs to the version it published, which the
+    // PutObject that preceded this already journalled. Only an abort has an
+    // event of its own.
+    if !require_completing {
+        journal_event(
+            write,
+            StorageEventType::MultipartAborted,
+            &bucket_name_of(write, upload.bucket_id)?,
+            Some(&upload.key),
+            None,
+            None,
+            Utc::now(),
+        )?;
+    }
     Ok(MultipartCleanupResult { parts })
 }
 
@@ -1210,6 +1322,18 @@ pub(crate) fn complete_cleanup_tx(
     Ok(())
 }
 
+/// Returns a bucket's name, for the events a mutation of it owes.
+///
+/// A bucket that has already gone leaves its identifier: an event naming
+/// nothing at all would be worse than one naming what the catalog still has.
+fn bucket_name_of(
+    write: &redb::WriteTransaction,
+    bucket_id: BucketId,
+) -> Result<String, MetadataError> {
+    Ok(read_bucket(write, bucket_id)?
+        .map_or_else(|| bucket_id.to_string(), |bucket| bucket.name.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use record_store_core::VersioningState;
@@ -1244,10 +1368,12 @@ mod tests {
             MetadataCommand::PutObject {
                 metadata: Box::new(first_object.clone()),
                 object_lock: None,
+                origin: WriteOrigin::Direct,
             },
             MetadataCommand::PutObject {
                 metadata: Box::new(second_object.clone()),
                 object_lock: None,
+                origin: WriteOrigin::Direct,
             },
             MetadataCommand::DeleteObject {
                 bucket_id: bucket_record.id,
@@ -1326,6 +1452,7 @@ mod tests {
                 MetadataCommand::PutObject {
                     metadata: Box::new(object(bucket_record.id, "a", 1)),
                     object_lock: None,
+                    origin: WriteOrigin::Direct,
                 },
                 "put_object",
             ),
@@ -1359,6 +1486,7 @@ mod tests {
             MetadataCommand::PutObject {
                 metadata: Box::new(object(bucket_record.id, "a", 1)),
                 object_lock: None,
+                origin: WriteOrigin::Direct,
             },
             MetadataCommand::DeleteObject {
                 bucket_id: bucket_record.id,
@@ -1483,6 +1611,7 @@ mod tests {
                 MetadataCommand::PutObject {
                     metadata: Box::new(committed.clone()),
                     object_lock: None,
+                    origin: WriteOrigin::Direct,
                 },
                 MetadataCommand::FinishMultipartUpload {
                     upload_id: upload_record.id,
@@ -1620,6 +1749,7 @@ mod tests {
                 MetadataCommand::PutObject {
                     metadata: Box::new(stored.clone()),
                     object_lock: None,
+                    origin: WriteOrigin::Direct,
                 },
                 MetadataCommand::DeleteObject {
                     bucket_id: bucket_record.id,

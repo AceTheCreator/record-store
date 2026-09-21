@@ -5,6 +5,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use record_store_core::{
     Bucket, BucketId, BucketName, BucketQuota, ObjectKey, OrganizationId, VersioningState,
+    WriteOrigin,
 };
 use record_store_metadata::{MetadataRepository, RedbMetadataRepository};
 use tempfile::TempDir;
@@ -81,6 +82,7 @@ pub(crate) async fn put(
             object_id: None,
             protocol_etag: None,
             object_lock: None,
+            origin: WriteOrigin::Direct,
             body: upload_stream(futures_util::stream::once(async move { Ok(owned) })),
         })
         .await
