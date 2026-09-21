@@ -433,7 +433,7 @@ mod tests {
         .await;
         assert!(
             !accounts.to_string().contains("unrecordable"),
-            "the refused account must not exist: {accounts}"
+            "the refused account must not exist"
         );
     }
 }
