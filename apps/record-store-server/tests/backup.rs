@@ -22,6 +22,9 @@ use tokio::{net::TcpListener, sync::oneshot};
 
 const ADMIN: &str = "test-system-management-token-32-bytes-long";
 const MASTER_KEY: &str = "test-credential-master-key-at-least-32-bytes";
+/// The service account every drill creates before the backup and looks for
+/// after the restore.
+const DRILL_ACCOUNT: &str = "restore-drill";
 
 /// A running deployment, and the handle that stops it.
 struct Deployment {
@@ -134,12 +137,14 @@ impl Deployment {
         response.json().await.expect("share JSON")
     }
 
-    /// Creates a service account and returns only its identifier.
+    /// Creates a service account, and returns nothing.
     ///
     /// The creation response carries the account's one-time secret access key.
-    /// Nothing in these tests needs it, and a value that never leaves this
-    /// function cannot end up in a panic message or a CI log.
-    async fn create_service_account(&self, name: &str) -> String {
+    /// No test here needs anything out of it — the account is identified by the
+    /// name passed in, which is a constant in this file — so the response is
+    /// dropped rather than returned. A value that never leaves this function
+    /// cannot reach a panic message or a CI log.
+    async fn create_service_account(&self, name: &str) {
         let response = self
             .client
             .post(self.url("/api/v1/service-accounts"))
@@ -153,11 +158,30 @@ impl Deployment {
             StatusCode::CREATED,
             "creating a service account"
         );
-        let issued: Value = response.json().await.expect("service account JSON");
-        issued["account"]["id"]
-            .as_str()
-            .expect("a created account has an identifier")
-            .to_owned()
+    }
+
+    /// Whether an account with this name survives in the deployment.
+    ///
+    /// Returns a plain answer rather than the listing: entries carry credential
+    /// records, and a listing interpolated into a failed assertion is how
+    /// credential material ends up in CI output.
+    async fn has_service_account(&self, name: &str) -> bool {
+        self.get_json("/api/v1/service-accounts")
+            .await
+            .as_array()
+            .expect("account list")
+            .iter()
+            .filter_map(|entry| entry["account"]["name"].as_str())
+            .any(|listed| listed == name)
+    }
+
+    /// How many service accounts the deployment knows about.
+    async fn service_account_count(&self) -> usize {
+        self.get_json("/api/v1/service-accounts")
+            .await
+            .as_array()
+            .expect("account list")
+            .len()
     }
 
     async fn create_lifecycle_rule(&self, bucket: &str, prefix: &str, days: u32) {
@@ -206,7 +230,7 @@ fn config_for(data_directory: std::path::PathBuf) -> Config {
 }
 
 /// Builds a deployment with something of every kind worth losing in it.
-async fn populated_deployment(directory: &TempDir, encrypted: bool) -> (Config, String, String) {
+async fn populated_deployment(directory: &TempDir, encrypted: bool) -> (Config, String) {
     let mut config = config_for(directory.path().join("source"));
     config.storage.encryption_enabled = encrypted;
     let deployment = Deployment::start(&config).await;
@@ -227,7 +251,7 @@ async fn populated_deployment(directory: &TempDir, encrypted: bool) -> (Config, 
         .create_lifecycle_rule("records", "deep/", 90)
         .await;
     let share = deployment.create_share("records", "notes.txt").await;
-    let account_id = deployment.create_service_account("restore-drill").await;
+    deployment.create_service_account(DRILL_ACCOUNT).await;
     let token = share["url"]
         .as_str()
         .expect("share URL")
@@ -237,7 +261,7 @@ async fn populated_deployment(directory: &TempDir, encrypted: bool) -> (Config, 
         .to_owned();
 
     deployment.stop().await;
-    (config, account_id, token)
+    (config, token)
 }
 
 /// The acceptance test for the whole feature: everything that mattered before
@@ -246,7 +270,7 @@ async fn populated_deployment(directory: &TempDir, encrypted: bool) -> (Config, 
 #[tokio::test]
 async fn a_restored_deployment_serves_the_same_objects_versions_shares_and_accounts() {
     let directory = tempdir().expect("temporary directory");
-    let (source_config, account_id, share_token) = populated_deployment(&directory, false).await;
+    let (source_config, share_token) = populated_deployment(&directory, false).await;
 
     let backup_directory = directory.path().join("backup");
     let report = backup::backup(&source_config, &backup_directory, false).expect("take a backup");
@@ -299,23 +323,9 @@ async fn a_restored_deployment_serves_the_same_objects_versions_shares_and_accou
         "history is part of the deployment: {versions:?}"
     );
 
-    let accounts = restored.get_json("/api/v1/service-accounts").await;
-    let restored_accounts: Vec<(&str, &str)> = accounts
-        .as_array()
-        .expect("account list")
-        .iter()
-        .filter_map(|entry| {
-            Some((
-                entry["account"]["id"].as_str()?,
-                entry["account"]["name"].as_str()?,
-            ))
-        })
-        .collect();
     assert!(
-        restored_accounts
-            .iter()
-            .any(|(id, name)| *id == account_id && *name == "restore-drill"),
-        "service accounts are deployment state: {restored_accounts:?} does not contain {account_id}"
+        restored.has_service_account(DRILL_ACCOUNT).await,
+        "the service account that existed before the backup is absent after the restore"
     );
 
     assert_eq!(
@@ -339,7 +349,7 @@ async fn a_restored_deployment_serves_the_same_objects_versions_shares_and_accou
 #[tokio::test]
 async fn an_interrupted_backup_is_refused_rather_than_restored() {
     let directory = tempdir().expect("temporary directory");
-    let (source_config, _, _) = populated_deployment(&directory, false).await;
+    let (source_config, _) = populated_deployment(&directory, false).await;
     let backup_directory = directory.path().join("backup");
     backup::backup(&source_config, &backup_directory, false).expect("take a backup");
 
@@ -388,7 +398,7 @@ async fn an_interrupted_backup_is_refused_rather_than_restored() {
 #[tokio::test]
 async fn a_backup_never_overwrites_a_complete_one_and_retries_over_an_incomplete_one() {
     let directory = tempdir().expect("temporary directory");
-    let (source_config, _, _) = populated_deployment(&directory, false).await;
+    let (source_config, _) = populated_deployment(&directory, false).await;
     let backup_directory = directory.path().join("backup");
     backup::backup(&source_config, &backup_directory, false).expect("take a backup");
 
@@ -435,7 +445,7 @@ async fn a_backup_never_overwrites_a_complete_one_and_retries_over_an_incomplete
 #[tokio::test]
 async fn a_backup_missing_a_required_component_is_refused() {
     let directory = tempdir().expect("temporary directory");
-    let (source_config, _, _) = populated_deployment(&directory, false).await;
+    let (source_config, _) = populated_deployment(&directory, false).await;
     let backup_directory = directory.path().join("backup");
     backup::backup(&source_config, &backup_directory, false).expect("take a backup");
 
@@ -480,7 +490,7 @@ async fn a_backup_missing_a_required_component_is_refused() {
 #[tokio::test]
 async fn modified_and_truncated_components_fail_verification() {
     let directory = tempdir().expect("temporary directory");
-    let (source_config, _, _) = populated_deployment(&directory, false).await;
+    let (source_config, _) = populated_deployment(&directory, false).await;
     let backup_directory = directory.path().join("backup");
     backup::backup(&source_config, &backup_directory, false).expect("take a backup");
 
@@ -531,7 +541,7 @@ async fn modified_and_truncated_components_fail_verification() {
 #[tokio::test]
 async fn an_incompatible_backup_is_refused_with_an_upgrade_instruction() {
     let directory = tempdir().expect("temporary directory");
-    let (source_config, _, _) = populated_deployment(&directory, false).await;
+    let (source_config, _) = populated_deployment(&directory, false).await;
     let backup_directory = directory.path().join("backup");
     backup::backup(&source_config, &backup_directory, false).expect("take a backup");
 
@@ -563,7 +573,7 @@ async fn an_incompatible_backup_is_refused_with_an_upgrade_instruction() {
 #[tokio::test]
 async fn an_encrypted_backup_checks_the_key_without_ever_exposing_it() {
     let directory = tempdir().expect("temporary directory");
-    let (source_config, _, _) = populated_deployment(&directory, true).await;
+    let (source_config, _) = populated_deployment(&directory, true).await;
     let backup_directory = directory.path().join("backup");
     let report = backup::backup(&source_config, &backup_directory, false).expect("take a backup");
     assert!(
@@ -630,7 +640,7 @@ async fn an_encrypted_backup_checks_the_key_without_ever_exposing_it() {
 #[tokio::test]
 async fn an_interrupted_restore_blocks_start_up_and_retries_cleanly() {
     let directory = tempdir().expect("temporary directory");
-    let (source_config, _, _) = populated_deployment(&directory, false).await;
+    let (source_config, _) = populated_deployment(&directory, false).await;
     let backup_directory = directory.path().join("backup");
     backup::backup(&source_config, &backup_directory, false).expect("take a backup");
 
@@ -697,7 +707,7 @@ async fn an_interrupted_restore_blocks_start_up_and_retries_cleanly() {
 #[tokio::test]
 async fn a_restore_refuses_to_touch_a_populated_data_directory() {
     let directory = tempdir().expect("temporary directory");
-    let (source_config, _, _) = populated_deployment(&directory, false).await;
+    let (source_config, _) = populated_deployment(&directory, false).await;
     let backup_directory = directory.path().join("backup");
     backup::backup(&source_config, &backup_directory, false).expect("take a backup");
 
@@ -724,7 +734,7 @@ async fn a_restore_refuses_to_touch_a_populated_data_directory() {
 #[tokio::test]
 async fn the_full_level_detects_a_payload_the_catalog_still_references() {
     let directory = tempdir().expect("temporary directory");
-    let (source_config, _, _) = populated_deployment(&directory, false).await;
+    let (source_config, _) = populated_deployment(&directory, false).await;
     let backup_directory = directory.path().join("backup");
     backup::backup(&source_config, &backup_directory, false).expect("take a backup");
 
@@ -765,7 +775,7 @@ async fn the_full_level_detects_a_payload_the_catalog_still_references() {
 #[tokio::test]
 async fn a_metadata_only_backup_from_the_previous_format_still_restores() {
     let directory = tempdir().expect("temporary directory");
-    let (source_config, _, _) = populated_deployment(&directory, false).await;
+    let (source_config, _) = populated_deployment(&directory, false).await;
     let legacy = directory.path().join("legacy");
     record_store_server::backup_metadata(&source_config, &legacy).expect("legacy backup");
 
@@ -810,7 +820,7 @@ async fn an_uninitialized_data_directory_is_not_backed_up() {
 #[tokio::test]
 async fn staging_files_are_left_out_of_the_backup() {
     let directory = tempdir().expect("temporary directory");
-    let (source_config, _, _) = populated_deployment(&directory, false).await;
+    let (source_config, _) = populated_deployment(&directory, false).await;
     let staging = source_config
         .storage
         .data_directory
@@ -843,7 +853,7 @@ async fn staging_files_are_left_out_of_the_backup() {
 #[tokio::test]
 async fn protection_settings_and_the_catalog_survive_byte_for_byte() {
     let directory = tempdir().expect("temporary directory");
-    let (source_config, _, _) = populated_deployment(&directory, false).await;
+    let (source_config, _) = populated_deployment(&directory, false).await;
     let source_catalog = source_config
         .storage
         .data_directory
@@ -954,12 +964,18 @@ async fn service_accounts_survive_an_ordinary_restart() {
     let config = config_for(directory.path().join("data"));
     let deployment = Deployment::start(&config).await;
     deployment.create_service_account("restart-probe").await;
-    let before = deployment.get_json("/api/v1/service-accounts").await;
-    assert_eq!(before.as_array().expect("list").len(), 1, "{before:?}");
+    assert_eq!(
+        deployment.service_account_count().await,
+        1,
+        "the account was not created"
+    );
     deployment.stop().await;
 
     let deployment = Deployment::start(&config).await;
-    let after = deployment.get_json("/api/v1/service-accounts").await;
+    let survivors = deployment.service_account_count().await;
     deployment.stop().await;
-    assert_eq!(after.as_array().expect("list").len(), 1, "{after:?}");
+    assert_eq!(
+        survivors, 1,
+        "the account did not survive an ordinary restart"
+    );
 }
