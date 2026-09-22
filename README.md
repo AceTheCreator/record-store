@@ -50,6 +50,10 @@ underlying storage and your backups.
 | Evidence of file integrity | Checksums on write and read, plus signed proof bundles for offline verification |
 | Access through S3 tools | Common S3 operations; [some features are unsupported](#s3-compatibility) |
 | File sharing | Revocable share pages and read-only embed URLs |
+| Encryption at rest | Optional AES-256-GCM payload encryption; you must preserve the deployment's master key |
+| Access control | Allow/deny policies for S3 service accounts and separate management roles |
+| Event notifications | Signed webhooks for storage events |
+| Automatic expiration | Lifecycle rules for current and non-current object versions |
 | A simple deployment | A single-machine server with embedded metadata databases and an optional web console |
 | Built-in replication or automatic failover | Not implemented; recovery requires restoring or recovering the machine |
 | Tamper-evident audit history | In development; durable audit logging is available today |
@@ -193,6 +197,16 @@ an interrupted upload must restart from the beginning.
 The S3 and management APIs use a shared service layer. Object payloads live on the
 local filesystem under generated identifiers; bucket names and object keys never
 become filesystem paths. Metadata lives in embedded databases.
+
+```text
+S3 API ───────────┐
+                  ├──► Shared service layer ──► Filesystem storage
+Management API ───┘             │               (object payloads and
+                               │                checksum verification)
+                               ▼
+                        Metadata catalog
+                   (buckets, objects, versions)
+```
 
 Writes stream to temporary files, compute checksums, synchronize to disk, and
 rename payloads into place before publishing metadata. Recovery journals reconcile
