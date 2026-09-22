@@ -28,6 +28,7 @@ links.
 Replication and erasure coding are not implemented. Durability depends on the
 underlying storage and your backups.
 
+[Product page](https://record-store.io) ·
 [Documentation](https://openelementslabs.github.io/record-store/) ·
 [Installation](https://openelementslabs.github.io/record-store/getting-started/installation/) ·
 [Changelog](CHANGELOG.md)
