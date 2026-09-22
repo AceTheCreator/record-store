@@ -317,16 +317,27 @@ Storage events are persisted separately from audit events. Matching webhook deli
 
 Lifecycle rules support prefix-scoped current-object expiration and non-current-version expiration. The supervised worker scans indexed metadata in bounded pages, persists a cursor per rule, and writes an audit event for each successful deletion.
 
-### Offline metadata backup
+### Offline backup and restore
 
-Stop Record Store before backup or restore. The command obtains an exclusive data-directory lock, so it refuses to race a running server. Backups contain versioned, SHA-256-verified metadata database files, not object payloads or configuration secrets.
+Stop Record Store before backup or restore. The command obtains an exclusive data-directory lock, so it refuses to race a running server; that lock is what makes the copy a single point in time rather than a catalog caught mid-write. One destination holds object payloads, metadata databases, and the system records that say which storage format and which master key the payloads use, with a manifest carrying format versions, a component inventory, sizes, and a SHA-256 per file. Configuration secrets and the credential master key are deliberately never included.
 
 ```bash
-cargo run --bin record-store -- server backup-metadata ./backup-2026-08-21
-cargo run --bin record-store -- server restore-metadata ./backup-2026-08-21
+cargo run --bin record-store -- server backup ./backup-2026-09-22
+cargo run --bin record-store -- server verify-backup ./backup-2026-09-22 --level full
+cargo run --bin record-store -- server restore ./backup-2026-09-22 --level full
 ```
 
-Restore refuses an incompatible manifest or a non-empty target metadata directory.
+A backup in progress carries an `INCOMPLETE` marker removed only once the manifest is durable, so an interrupted run cannot be mistaken for a finished one. Verification levels are named separately — `manifest` reads no file contents, `checksums` recomputes every file, `full` also cross-checks the catalog against the payloads — so a structural check is never reported as a full verification. Restore verifies before writing, stages into the data directory and renames components into place, refuses a data directory that already holds one, and leaves a marker that stops the server starting on a half-restored deployment.
+
+`server backup-metadata` and `server restore-metadata` remain for existing runbooks. They copy metadata only and warn on use.
+
+### Start-up diagnostics
+
+```bash
+cargo run --bin record-store -- server --config ./record-store.toml doctor
+```
+
+Reports whether the machine can run the configured deployment — data-directory permissions, whether the temporary directory allows atomic publication by rename, the on-disk storage format, free space, address availability, and which key material is present — without starting anything, opening any database, or printing any secret value. Exits 0 when nothing failed and 7 when something did. The subset that would otherwise surface after the databases are open also runs at start-up, and the listeners are bound before initialization so an occupied address fails immediately.
 
 ### Configuration
 
@@ -349,6 +360,7 @@ Configuration file values overlay defaults, then environment variables take prec
 | `RECORD_STORE_MANAGEMENT_AUDITOR_TOKEN` | `auth.management_auditor_token` |
 | `RECORD_STORE_METRICS_SCRAPE_TOKEN` | `auth.metrics_scrape_token` |
 | `RECORD_STORE_MAX_CONCURRENT_OPERATIONS` | `limits.maximum_concurrent_operations` |
+| `RECORD_STORE_ADMISSION_WAIT_LIMIT_SECONDS` | `limits.admission_wait_limit_seconds` |
 | `RECORD_STORE_MAX_HEADER_BYTES` | `limits.maximum_header_bytes` |
 | `RECORD_STORE_WEBHOOK_ALLOW_HTTP` | `webhooks.allow_http` |
 | `RECORD_STORE_WEBHOOK_ALLOW_PRIVATE_NETWORKS` | `webhooks.allow_private_networks` |

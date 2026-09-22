@@ -171,6 +171,10 @@ mod tests {
             errors: 0,
             upload_bytes: requests * 10,
             download_bytes: requests * 5,
+            active_operations: 0,
+            queued_operations: 0,
+            rejected_operations: 0,
+            concurrency_limit: 0,
         }
     }
 

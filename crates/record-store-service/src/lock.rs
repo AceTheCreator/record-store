@@ -18,7 +18,6 @@ use record_store_core::{
     VersionId,
 };
 use record_store_metadata::{LockRelease, MetadataRepository};
-use tokio::sync::Semaphore;
 use tracing::warn;
 
 use crate::error::map_metadata;
@@ -168,7 +167,7 @@ pub struct VersionLock {
 pub struct ObjectLockService {
     pub(crate) metadata: Arc<dyn MetadataRepository>,
     pub(crate) coordinator: Arc<BucketCoordinator>,
-    pub(crate) operations: Arc<Semaphore>,
+    pub(crate) admission: Arc<crate::admission::Admission>,
     pub(crate) metrics: Arc<ServiceMetrics>,
     pub(crate) policy: Arc<LockPolicy>,
 }
@@ -412,11 +411,8 @@ impl ObjectLockService {
             .ok_or(ServiceError::BucketNotFound)
     }
 
-    async fn acquire(&self) -> Result<tokio::sync::OwnedSemaphorePermit, ServiceError> {
-        Arc::clone(&self.operations)
-            .acquire_owned()
-            .await
-            .map_err(|_| ServiceError::Unavailable)
+    async fn acquire(&self) -> Result<crate::admission::OperationPermit, ServiceError> {
+        self.admission.acquire().await
     }
 }
 

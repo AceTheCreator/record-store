@@ -549,6 +549,7 @@ mod tests {
             bucket.organization_id,
             ServiceLimits {
                 maximum_concurrent_operations: 4,
+                admission_wait_limit_seconds: 5,
                 maximum_custom_metadata_entries: 8,
                 maximum_custom_metadata_bytes: 1024,
                 object_lock: ObjectLockLimits::default(),
@@ -640,6 +641,7 @@ mod tests {
             OrganizationId::new(),
             ServiceLimits {
                 maximum_concurrent_operations: 4,
+                admission_wait_limit_seconds: 5,
                 maximum_custom_metadata_entries: 8,
                 maximum_custom_metadata_bytes: 1024,
                 object_lock: ObjectLockLimits::default(),
@@ -743,6 +745,7 @@ mod tests {
             bucket.organization_id,
             ServiceLimits {
                 maximum_concurrent_operations: 4,
+                admission_wait_limit_seconds: 5,
                 maximum_custom_metadata_entries: 8,
                 maximum_custom_metadata_bytes: 1024,
                 object_lock: ObjectLockLimits::default(),
@@ -884,6 +887,7 @@ mod tests {
             bucket.organization_id,
             ServiceLimits {
                 maximum_concurrent_operations: 4,
+                admission_wait_limit_seconds: 5,
                 maximum_custom_metadata_entries: 8,
                 maximum_custom_metadata_bytes: 1024,
                 object_lock: ObjectLockLimits::default(),

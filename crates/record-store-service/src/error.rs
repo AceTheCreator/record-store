@@ -94,6 +94,13 @@ pub enum ServiceError {
     /// Backpressure subsystem is unavailable.
     #[error("service is unavailable")]
     Unavailable,
+    /// Too much work is already in flight for this operation to start.
+    ///
+    /// Distinct from [`ServiceError::Unavailable`] because the answers differ:
+    /// this one is the deployment working as configured, and the caller should
+    /// back off and retry rather than treat it as a fault.
+    #[error("too many operations are already in flight")]
+    Overloaded,
     /// The cluster cannot currently satisfy the operation.
     ///
     /// This is reported honestly as a retryable condition rather than being

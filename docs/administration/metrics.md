@@ -57,6 +57,23 @@ reachable. See [Ports](../reference/ports.md).
 These are process-lifetime counters. They reset on restart — use `rate()` and
 `increase()` rather than reading the raw value.
 
+### Admission control
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `record_store_operations_active` | gauge | Operations holding a concurrency permit |
+| `record_store_operations_queued` | gauge | Operations waiting for one |
+| `record_store_operations_rejected_total` | counter | Operations refused for waiting longer than `limits.admission_wait_limit_seconds` |
+| `record_store_operations_concurrency_limit` | gauge | The configured `limits.maximum_concurrent_operations` |
+
+Saturation is `active / concurrency_limit`; the limit is exported so the ratio can be
+computed in the query rather than pinned in the dashboard.
+
+A rejection is not an error. It is the deployment refusing work it has no capacity
+for, answered to S3 clients as `SlowDown` and to the management API as
+`TOO_MANY_OPERATIONS`, both with `503`, both retryable. `record_store_errors_total`
+does not count them.
+
 ### Storage
 
 | Metric | Type | Meaning |
@@ -68,6 +85,9 @@ These are process-lifetime counters. They reset on restart — use `rate()` and
 | `record_store_storage_bytes` | gauge | Same value, kept for existing scrapers |
 | `record_store_storage_physical_bytes` | gauge | Bytes actually occupied |
 | `record_store_multipart_bytes` | gauge | Bytes held by in-progress multipart uploads |
+| `record_store_temporary_bytes` | gauge | Bytes held by upload staging files not yet published |
+| `record_store_filesystem_capacity_bytes` | gauge | Size of the filesystem holding the data directory |
+| `record_store_filesystem_available_bytes` | gauge | Bytes still free on it |
 
 The gap between logical and physical bytes is version history and multipart parts.
 Watch physical bytes for capacity, logical bytes for what users think they have. See
@@ -120,10 +140,11 @@ groups:
 The `for:` clauses matter. A brief spike during a restart resolves itself; alerting
 instantly produces noise that gets muted, which is worse than no alert.
 
-!!! note "Free disk space is not a Record Store metric"
-    `record_store_storage_bytes` is what Record Store has stored, not what the
-    filesystem has left. Alert on free space with a host exporter — Record Store
-    does not report the disk's own capacity. See
+!!! note "Two different numbers about space"
+    `record_store_storage_bytes` is what Record Store has stored.
+    `record_store_filesystem_available_bytes` is what the filesystem holding the data
+    directory has left — which is the one to alert on, because anything else on that
+    filesystem consumes it too. See
     [Capacity Planning](../operations/capacity-planning.md).
 
 ## JSON view

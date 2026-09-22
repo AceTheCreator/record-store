@@ -13,7 +13,9 @@ shutdown_grace_period_seconds = 30
 [storage]
 data_directory = "./data"
 encryption_enabled = false # requires a stable RECORD_STORE_CREDENTIAL_MASTER_KEY
-# Keep this on the same filesystem as data_directory when overriding it.
+# Keep this on the same filesystem as data_directory when overriding it: a payload is
+# published by renaming it out of here, and a rename cannot cross a mount boundary.
+# `record-store server doctor` refuses a deployment that gets this wrong.
 # temporary_directory = "./data/tmp"
 
 [auth]
@@ -29,6 +31,11 @@ root_s3_enabled = true # disable after attaching policies to service accounts
 
 [limits]
 maximum_concurrent_operations = 256
+# How long an operation may wait for one of those slots before it is refused with a
+# retryable "slow down" rather than queued. The concurrency limit bounds the work in
+# flight; this bounds the work waiting to be, which is what otherwise grows without
+# limit under sustained overload.
+admission_wait_limit_seconds = 15
 maximum_custom_metadata_entries = 64
 maximum_custom_metadata_bytes = 16384
 maximum_header_bytes = 65536

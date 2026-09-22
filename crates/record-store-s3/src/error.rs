@@ -74,6 +74,7 @@ pub(crate) fn service_error(
         | ServiceError::Storage(_)
         | ServiceError::Coordination
         | ServiceError::Unavailable => S3ErrorKind::InternalError,
+        ServiceError::Overloaded => S3ErrorKind::SlowDown,
     };
     S3Error::new(kind, request_id, resource)
 }
@@ -158,6 +159,12 @@ pub(crate) enum S3ErrorKind {
     BadDigest,
     NotImplemented,
     ServiceUnavailable,
+    /// The deployment is at its configured concurrency limit.
+    ///
+    /// `SlowDown` is the code every S3 client already knows how to back off
+    /// from, which is the whole reason overload is reported as its own kind
+    /// rather than folded into an internal error.
+    SlowDown,
     InternalError,
 }
 
@@ -195,6 +202,7 @@ impl S3ErrorKind {
             Self::BadDigest => "BadDigest",
             Self::NotImplemented | Self::StreamingPayloadNotImplemented => "NotImplemented",
             Self::ServiceUnavailable => "ServiceUnavailable",
+            Self::SlowDown => "SlowDown",
             Self::InternalError => "InternalError",
         }
     }
@@ -258,6 +266,7 @@ impl S3ErrorKind {
             Self::ServiceUnavailable => {
                 "The cluster cannot currently satisfy this request; retry shortly"
             }
+            Self::SlowDown => "Please reduce your request rate",
             Self::InternalError => "We encountered an internal error",
         }
     }
@@ -284,7 +293,7 @@ impl S3ErrorKind {
             Self::NotImplemented | Self::StreamingPayloadNotImplemented => {
                 StatusCode::NOT_IMPLEMENTED
             }
-            Self::ServiceUnavailable | Self::RetentionClockUnavailable => {
+            Self::ServiceUnavailable | Self::RetentionClockUnavailable | Self::SlowDown => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
             Self::InternalError => StatusCode::INTERNAL_SERVER_ERROR,

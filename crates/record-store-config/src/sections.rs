@@ -210,6 +210,13 @@ impl Default for AuthConfig {
 pub struct LimitsConfig {
     /// Maximum simultaneously executing storage operations.
     pub maximum_concurrent_operations: usize,
+    /// How long an operation may wait for a concurrency permit before it is
+    /// refused with a retryable "slow down" rather than queued.
+    ///
+    /// The concurrency limit bounds the work in flight. This bounds the work
+    /// waiting to be in flight, which is what otherwise grows without limit
+    /// under sustained overload.
+    pub admission_wait_limit_seconds: u32,
     /// Maximum number of `x-amz-meta-*` entries on one object.
     pub maximum_custom_metadata_entries: usize,
     /// Maximum aggregate custom-metadata bytes on one object.
@@ -222,6 +229,10 @@ impl Default for LimitsConfig {
     fn default() -> Self {
         Self {
             maximum_concurrent_operations: 256,
+            // Long enough that an ordinary burst queues and clears, short
+            // enough that a client learns the deployment is saturated while the
+            // answer is still useful to it.
+            admission_wait_limit_seconds: 15,
             maximum_custom_metadata_entries: 64,
             maximum_custom_metadata_bytes: 16 * 1024,
             maximum_header_bytes: 64 * 1024,

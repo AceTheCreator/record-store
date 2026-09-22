@@ -254,6 +254,7 @@ impl PartialAuthConfig {
 #[serde(deny_unknown_fields)]
 pub(crate) struct PartialLimitsConfig {
     maximum_concurrent_operations: Option<usize>,
+    admission_wait_limit_seconds: Option<u32>,
     maximum_custom_metadata_entries: Option<usize>,
     maximum_custom_metadata_bytes: Option<usize>,
     maximum_header_bytes: Option<usize>,
@@ -263,6 +264,9 @@ impl PartialLimitsConfig {
     pub(crate) fn apply(self, target: &mut LimitsConfig) {
         if let Some(value) = self.maximum_concurrent_operations {
             target.maximum_concurrent_operations = value;
+        }
+        if let Some(value) = self.admission_wait_limit_seconds {
+            target.admission_wait_limit_seconds = value;
         }
         if let Some(value) = self.maximum_custom_metadata_entries {
             target.maximum_custom_metadata_entries = value;

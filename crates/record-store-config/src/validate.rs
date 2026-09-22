@@ -222,6 +222,14 @@ impl Config {
             issues
                 .push("limits.maximum_concurrent_operations must be greater than zero".to_owned());
         }
+        // Zero would refuse everything the moment the limit is reached, and a
+        // wait long enough to outlast a client's own timeout is a queue by
+        // another name.
+        if self.limits.admission_wait_limit_seconds == 0
+            || self.limits.admission_wait_limit_seconds > 300
+        {
+            issues.push("limits.admission_wait_limit_seconds must be between 1 and 300".to_owned());
+        }
         if self.limits.maximum_custom_metadata_entries > 1_024 {
             issues.push("limits.maximum_custom_metadata_entries must not exceed 1024".to_owned());
         }

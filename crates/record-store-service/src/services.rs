@@ -9,7 +9,7 @@ use record_store_audit::AuditRepository;
 use record_store_core::{BucketId, OrganizationId};
 use record_store_metadata::MetadataRepository;
 use record_store_storage::ObjectStore;
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::RwLock;
 
 use crate::lock::LockPolicy;
 use crate::*;
@@ -86,8 +86,12 @@ impl Services {
         audit: Option<Arc<dyn AuditRepository>>,
     ) -> Self {
         let coordinator = Arc::new(BucketCoordinator::default());
-        let operations = Arc::new(Semaphore::new(limits.maximum_concurrent_operations));
         let metrics = Arc::new(ServiceMetrics::default());
+        let admission = Arc::new(crate::admission::Admission::new(
+            limits.maximum_concurrent_operations,
+            std::time::Duration::from_secs(u64::from(limits.admission_wait_limit_seconds)),
+            Arc::clone(&metrics),
+        ));
         let policy = Arc::new(LockPolicy {
             clock_tolerance_seconds: limits.object_lock.clock_backwards_tolerance_seconds,
             audit,
@@ -96,7 +100,7 @@ impl Services {
             buckets: Arc::new(BucketService {
                 metadata: Arc::clone(&metadata),
                 coordinator: Arc::clone(&coordinator),
-                operations: Arc::clone(&operations),
+                admission: Arc::clone(&admission),
                 metrics: Arc::clone(&metrics),
                 owner,
             }),
@@ -104,7 +108,7 @@ impl Services {
                 storage,
                 metadata: Arc::clone(&metadata),
                 coordinator: Arc::clone(&coordinator),
-                operations: Arc::clone(&operations),
+                admission: Arc::clone(&admission),
                 metrics: Arc::clone(&metrics),
                 maximum_custom_metadata_entries: limits.maximum_custom_metadata_entries,
                 maximum_custom_metadata_bytes: limits.maximum_custom_metadata_bytes,
@@ -113,7 +117,7 @@ impl Services {
             locks: Arc::new(ObjectLockService {
                 metadata,
                 coordinator,
-                operations,
+                admission,
                 metrics: Arc::clone(&metrics),
                 policy,
             }),
@@ -127,6 +131,13 @@ impl Services {
 pub struct ServiceLimits {
     /// Maximum concurrent service operations.
     pub maximum_concurrent_operations: usize,
+    /// How long an operation may wait for a concurrency permit before it is
+    /// refused with a retryable error.
+    ///
+    /// Without a bound here the concurrency limit only bounds the work in
+    /// flight; everything beyond it queues for as long as clients are willing
+    /// to wait, and that queue is what runs a small deployment out of memory.
+    pub admission_wait_limit_seconds: u32,
     /// Maximum custom metadata entry count.
     pub maximum_custom_metadata_entries: usize,
     /// Maximum aggregate custom metadata bytes.

@@ -8,7 +8,6 @@ use record_store_core::{
     OrganizationId, VersioningState,
 };
 use record_store_metadata::MetadataRepository;
-use tokio::sync::Semaphore;
 
 use crate::error::map_metadata;
 use crate::services::BucketCoordinator;
@@ -18,7 +17,7 @@ use crate::*;
 pub struct BucketService {
     pub(crate) metadata: Arc<dyn MetadataRepository>,
     pub(crate) coordinator: Arc<BucketCoordinator>,
-    pub(crate) operations: Arc<Semaphore>,
+    pub(crate) admission: Arc<crate::admission::Admission>,
     pub(crate) metrics: Arc<ServiceMetrics>,
     pub(crate) owner: OrganizationId,
 }
@@ -181,10 +180,7 @@ impl BucketService {
             .ok_or(ServiceError::BucketNotFound)
     }
 
-    pub(crate) async fn acquire(&self) -> Result<tokio::sync::OwnedSemaphorePermit, ServiceError> {
-        Arc::clone(&self.operations)
-            .acquire_owned()
-            .await
-            .map_err(|_| ServiceError::Unavailable)
+    pub(crate) async fn acquire(&self) -> Result<crate::admission::OperationPermit, ServiceError> {
+        self.admission.acquire().await
     }
 }
