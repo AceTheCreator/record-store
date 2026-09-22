@@ -181,6 +181,15 @@ pub(crate) fn service_to_api_error(error: ServiceError, request_id: RequestId) -
                 request_id,
             )
         }
+        // Overload is the deployment working as configured, not a fault, so it
+        // is answered with a retryable status rather than logged as an internal
+        // error somebody will go looking for.
+        ServiceError::Overloaded => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TOO_MANY_OPERATIONS",
+            "Too many operations are already in flight; retry shortly",
+            request_id,
+        ),
         error => internal_service_error(error, request_id),
     }
 }

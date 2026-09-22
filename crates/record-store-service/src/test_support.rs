@@ -38,6 +38,7 @@ pub(crate) async fn services_with(limits: ServiceLimits) -> (TempDir, Services) 
 pub(crate) async fn services() -> (TempDir, Services) {
     services_with(ServiceLimits {
         maximum_concurrent_operations: 8,
+        admission_wait_limit_seconds: 5,
         maximum_custom_metadata_entries: 8,
         maximum_custom_metadata_bytes: 1_024,
         object_lock: crate::ObjectLockLimits::default(),
@@ -81,6 +82,7 @@ pub(crate) async fn services_with_audit() -> (
         OrganizationId::new(),
         ServiceLimits {
             maximum_concurrent_operations: 8,
+            admission_wait_limit_seconds: 5,
             maximum_custom_metadata_entries: 8,
             maximum_custom_metadata_bytes: 1_024,
             object_lock: crate::ObjectLockLimits::default(),

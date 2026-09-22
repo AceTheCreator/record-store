@@ -1,7 +1,9 @@
 //! Explicit Record Store server initialization and dual-listener lifecycle orchestration.
 
+pub mod backup;
 mod cluster;
 pub mod discovery;
+pub mod preflight;
 
 use std::{
     fs::{File, OpenOptions},
@@ -165,6 +167,22 @@ impl ServerRuntime {
 /// local operations, and runs startup probes.
 pub async fn initialize(config: &Config) -> Result<ServerRuntime, StartupError> {
     config.validate().map_err(StartupError::Configuration)?;
+    // Preconditions the machine has to meet, checked before any database is
+    // created. Without this, a read-only volume or a temporary directory on
+    // another filesystem is discovered after the data lock is taken and half
+    // the subsystems are open, which is both slower to diagnose and messier to
+    // recover from.
+    let preflight = preflight::startup_checks(config);
+    if preflight.has_failures() {
+        return Err(StartupError::Preflight(preflight.failure_summary()));
+    }
+    for check in preflight
+        .checks
+        .iter()
+        .filter(|check| check.status == preflight::Status::Warn)
+    {
+        warn!(check = check.name, detail = %check.detail, "start-up check");
+    }
     std::fs::create_dir_all(&config.storage.data_directory).map_err(StartupError::DataDirectory)?;
     let process_lock =
         acquire_data_lock(&config.storage.data_directory).map_err(StartupError::DataDirectory)?;
@@ -294,6 +312,7 @@ pub async fn initialize(config: &Config) -> Result<ServerRuntime, StartupError> 
         owner,
         ServiceLimits {
             maximum_concurrent_operations: config.limits.maximum_concurrent_operations,
+            admission_wait_limit_seconds: config.limits.admission_wait_limit_seconds,
             maximum_custom_metadata_entries: config.limits.maximum_custom_metadata_entries,
             maximum_custom_metadata_bytes: config.limits.maximum_custom_metadata_bytes,
             object_lock: ObjectLockLimits {
@@ -503,7 +522,11 @@ pub async fn run<F>(config: &Config, shutdown: F) -> Result<(), StartupError>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let runtime = initialize(config).await?;
+    // Bound before initialization, not after. An address another process
+    // already holds is the most common start-up failure there is, and binding
+    // last meant meeting it only once every database was open and the data lock
+    // taken — a minute of work to report a fault that is knowable immediately.
+    // Nothing is served from these sockets until `serve` runs below.
     let s3_listener = TcpListener::bind(config.server.s3_bind)
         .await
         .map_err(|source| StartupError::Listen {
@@ -516,6 +539,7 @@ where
             interface: "management",
             source,
         })?;
+    let runtime = initialize(config).await?;
     info!(mode = %config.server.mode, "Record Store starting");
     info!(address = %config.server.s3_bind, "S3 API listening");
     info!(address = %config.server.api_bind, "management API listening");
@@ -787,7 +811,7 @@ pub fn restore_metadata(config: &Config, input: &Path) -> Result<(), MetadataBac
     Ok(())
 }
 
-fn acquire_data_lock(data_directory: &Path) -> Result<File, std::io::Error> {
+pub(crate) fn acquire_data_lock(data_directory: &Path) -> Result<File, std::io::Error> {
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
@@ -866,6 +890,9 @@ pub enum StartupError {
     /// Resolved configuration was invalid.
     #[error("invalid configuration: {0}")]
     Configuration(record_store_config::ConfigError),
+    /// A start-up precondition of the machine itself was not met.
+    #[error("start-up checks failed: {0}")]
+    Preflight(String),
     /// Credential initialization failed.
     #[error("credential initialization failed: {0}")]
     Credentials(#[from] CredentialStoreError),

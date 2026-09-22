@@ -9,7 +9,8 @@
 2. **Take a backup and verify it.** An upgrade is the moment a backup earns its keep.
 
 ```bash
-record-store server backup-metadata --output /backups/pre-upgrade-2026-08-29
+record-store server backup /backups/pre-upgrade-2026-09-22
+record-store server verify-backup /backups/pre-upgrade-2026-09-22 --level full
 ```
 
 3. **Rehearse on a non-production deployment** with a copy of real metadata.
@@ -21,7 +22,7 @@ stopped. Plan a window rather than expecting a seamless swap.
 
 ```bash
 # 1. Back up
-record-store server backup-metadata --output /backups/pre-upgrade
+record-store server backup /backups/pre-upgrade
 
 # 2. Stop, allowing the full drain window
 docker stop --time 40 record-store
@@ -54,8 +55,9 @@ binary supports.
 - **Older binary, newer data** — refused. Downgrading past a schema change is not
   supported.
 
-The same rule applies to restores: `restore-metadata` rejects a backup whose schema
-version is newer than the binary's.
+The same rule applies to restores: `restore` rejects a backup whose schema version is
+newer than the binary's, and says so as an upgrade instruction rather than as a
+database error.
 
 This is why the backup comes first. Rolling back the binary does not roll back the
 metadata.
@@ -91,14 +93,15 @@ If the metadata schema changed, the old binary will refuse to open it. Then the 
 is a full restore:
 
 ```bash
-# Move the current metadata aside rather than deleting it
-mv /var/lib/record-store/metadata /var/lib/record-store/metadata.failed
+# Move the whole data directory aside rather than deleting it
+mv /var/lib/record-store /var/lib/record-store.failed
+mkdir -p /var/lib/record-store
 
-record-store server restore-metadata /backups/pre-upgrade
+record-store server restore /backups/pre-upgrade --level full
 ```
 
-Restore requires an empty `metadata/` directory. Object payloads under `objects/` are
-untouched by any of this.
+Restore requires a data directory with no `metadata/`, `objects/`, or `system/` in it,
+and brings all three back from the one backup.
 
 ## Console
 

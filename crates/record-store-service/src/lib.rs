@@ -1,6 +1,7 @@
 //! Shared bucket and object application services.
 
 mod admin;
+mod admission;
 mod bucket;
 mod error;
 mod event_pump;

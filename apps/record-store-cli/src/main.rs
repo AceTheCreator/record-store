@@ -120,9 +120,42 @@ struct ServerArgs {
 enum ServerCommand {
     /// Validate configuration without starting listeners.
     CheckConfig,
-    /// Create a consistent offline metadata backup directory.
+    /// Report whether this machine can run the configured deployment.
+    ///
+    /// Checks the data directory, its permissions, the filesystem arrangement
+    /// that makes payload publication atomic, the on-disk storage format, free
+    /// space, the configured addresses, and which key material is present. No
+    /// secret value is ever printed.
+    Doctor,
+    /// Back up a stopped deployment: payloads, metadata, and system records.
+    Backup {
+        /// Destination directory. Must be empty or absent.
+        output: PathBuf,
+        /// Replace a destination holding an interrupted backup. A completed
+        /// backup is never overwritten.
+        #[arg(long)]
+        replace_incomplete: bool,
+    },
+    /// Check a backup without restoring it.
+    VerifyBackup {
+        /// Backup directory.
+        input: PathBuf,
+        /// How much to check: `manifest`, `checksums`, or `full`. A
+        /// metadata-only check is never reported as a full verification.
+        #[arg(long, default_value = "checksums")]
+        level: String,
+    },
+    /// Restore a verified backup into an empty data directory.
+    Restore {
+        /// Backup directory.
+        input: PathBuf,
+        /// Verification to run before anything is written.
+        #[arg(long, default_value = "checksums")]
+        level: String,
+    },
+    /// Deprecated. Use `backup`, which also covers payloads and system records.
     BackupMetadata { output: PathBuf },
-    /// Restore a validated offline backup into an empty metadata directory.
+    /// Deprecated. Use `restore`, which also restores payloads.
     RestoreMetadata { input: PathBuf },
 }
 
@@ -723,6 +756,224 @@ struct StatusResponse {
     status: String,
 }
 
+/// Exit codes the maintenance commands use.
+///
+/// A backup script needs to tell "this backup is damaged" from "the disk is
+/// full" from "somebody is still running the server", and a single non-zero
+/// code cannot say which. These are stable: automation may match on them.
+mod exit {
+    /// The command did what was asked.
+    pub const OK: i32 = 0;
+    /// Something unexpected went wrong.
+    pub const FAILED: i32 = 1;
+    /// The configuration or the arguments were not usable.
+    pub const CONFIGURATION: i32 = 2;
+    /// The backup cannot be restored, or verification found problems.
+    pub const UNUSABLE_BACKUP: i32 = 3;
+    /// The destination already holds something this must not overwrite.
+    pub const DESTINATION_CONFLICT: i32 = 4;
+    /// The destination filesystem cannot hold the copy.
+    pub const INSUFFICIENT_SPACE: i32 = 5;
+    /// A Record Store process still holds the data directory.
+    pub const DATA_DIRECTORY_IN_USE: i32 = 6;
+    /// Diagnostic checks failed.
+    pub const CHECKS_FAILED: i32 = 7;
+}
+
+fn backup_exit_code(error: &record_store_server::backup::BackupError) -> i32 {
+    use record_store_server::backup::BackupError::*;
+
+    match error {
+        Configuration(_) | NotInitialized(_) => exit::CONFIGURATION,
+        DataDirectoryInUse(_) => exit::DATA_DIRECTORY_IN_USE,
+        DestinationHoldsBackup(_) | DestinationNotEmpty(_) => exit::DESTINATION_CONFLICT,
+        InsufficientSpace { .. } => exit::INSUFFICIENT_SPACE,
+        MissingComponent(_) | NoManifest(_) | InvalidManifest | Unusable(_)
+        | ChecksumMismatch(_) | UnsafePath(_) | Catalog(_) => exit::UNUSABLE_BACKUP,
+        Io(_) | Encoding(_) => exit::FAILED,
+    }
+}
+
+/// Reports the failure on stderr, and the machine-readable form on stdout when
+/// asked, so a JSON consumer always gets JSON.
+fn report_backup_error(error: &record_store_server::backup::BackupError, json: bool) -> i32 {
+    let code = backup_exit_code(error);
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "ok": false, "error": error.to_string(), "exit_code": code })
+        );
+    }
+    eprintln!("error: {error}");
+    code
+}
+
+fn doctor(config: &record_store_config::Config, json: bool) -> i32 {
+    let report = record_store_server::preflight::inspect(config, true);
+    if json {
+        match serde_json::to_string_pretty(&report) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(error) => {
+                eprintln!("error: {error}");
+                return exit::FAILED;
+            }
+        }
+    } else {
+        for check in &report.checks {
+            let marker = match check.status {
+                record_store_server::preflight::Status::Pass => "ok  ",
+                record_store_server::preflight::Status::Warn => "warn",
+                record_store_server::preflight::Status::Fail => "FAIL",
+            };
+            println!("{marker}  {:<28}  {}", check.name, check.detail);
+            if let Some(remedy) = &check.remedy {
+                println!("      {:<28}  -> {remedy}", "");
+            }
+        }
+    }
+    if report.has_failures() {
+        exit::CHECKS_FAILED
+    } else {
+        exit::OK
+    }
+}
+
+fn run_backup(
+    config: &record_store_config::Config,
+    output: &std::path::Path,
+    replace_incomplete: bool,
+    json: bool,
+) -> i32 {
+    match record_store_server::backup::backup(config, output, replace_incomplete) {
+        Ok(report) => {
+            if json {
+                match serde_json::to_string_pretty(&report) {
+                    Ok(rendered) => println!("{rendered}"),
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        return exit::FAILED;
+                    }
+                }
+            } else {
+                println!("backup complete: {}", report.destination.display());
+                for component in &report.manifest.components {
+                    println!(
+                        "  {:<10}  {:>8} files  {:>14} bytes",
+                        component.name, component.file_count, component.bytes
+                    );
+                }
+                println!("  consistency  {}", report.manifest.consistency);
+                println!("  secrets      not included; recover key material separately");
+            }
+            exit::OK
+        }
+        Err(error) => report_backup_error(&error, json),
+    }
+}
+
+fn run_verify_backup(
+    input: &std::path::Path,
+    level: &str,
+    master_key: Option<&[u8]>,
+    json: bool,
+) -> i32 {
+    let Some(level) = record_store_server::backup::VerificationLevel::parse(level) else {
+        eprintln!("error: unknown verification level; expected manifest, checksums, or full");
+        return exit::CONFIGURATION;
+    };
+    match record_store_server::backup::verify(input, level, master_key) {
+        Ok(report) => {
+            if json {
+                match serde_json::to_string_pretty(&report) {
+                    Ok(rendered) => println!("{rendered}"),
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        return exit::FAILED;
+                    }
+                }
+            } else {
+                println!("backup   {}", report.backup.display());
+                println!("level    {}", report.level);
+                println!("usable   {}", if report.usable { "yes" } else { "no" });
+                println!(
+                    "checked  {} files, {} bytes read",
+                    report.files_checksummed, report.bytes_read
+                );
+                if let Some(references) = report.payload_references_checked {
+                    println!(
+                        "payloads {references} references, {} missing, {} unreferenced",
+                        report.missing_payloads.unwrap_or_default(),
+                        report.unreferenced_payloads.unwrap_or_default()
+                    );
+                }
+                println!(
+                    "key      {}",
+                    match report.encryption_key_matches {
+                        Some(true) => "the supplied master key matches these payloads",
+                        Some(false) => "the supplied master key does NOT match these payloads",
+                        None => "not checked (unencrypted backup, or no key supplied)",
+                    }
+                );
+                for problem in &report.problems {
+                    println!("problem  {problem}");
+                }
+            }
+            if report.usable {
+                exit::OK
+            } else {
+                exit::UNUSABLE_BACKUP
+            }
+        }
+        Err(error) => report_backup_error(&error, json),
+    }
+}
+
+fn run_restore(
+    config: &record_store_config::Config,
+    input: &std::path::Path,
+    level: &str,
+    json: bool,
+) -> i32 {
+    let Some(level) = record_store_server::backup::VerificationLevel::parse(level) else {
+        eprintln!("error: unknown verification level; expected manifest, checksums, or full");
+        return exit::CONFIGURATION;
+    };
+    match record_store_server::backup::restore(config, input, level) {
+        Ok(report) => {
+            if json {
+                match serde_json::to_string_pretty(&report) {
+                    Ok(rendered) => println!("{rendered}"),
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        return exit::FAILED;
+                    }
+                }
+            } else {
+                println!(
+                    "restored {} into {}",
+                    report.source.display(),
+                    report.data_directory.display()
+                );
+                println!("verified at level {}", report.verified_at_level);
+                for component in &report.components {
+                    println!(
+                        "  {:<10}  {:>8} files  {:>14} bytes",
+                        component.name, component.file_count, component.bytes
+                    );
+                }
+                if report.cleared_interrupted_restore {
+                    println!("  cleared an interrupted earlier restore first");
+                }
+                for outstanding in &report.outstanding {
+                    println!("  note: {outstanding}");
+                }
+            }
+            exit::OK
+        }
+        Err(error) => report_backup_error(&error, json),
+    }
+}
+
 #[derive(Serialize)]
 struct NameRequest<'a> {
     name: &'a str,
@@ -739,9 +990,53 @@ async fn main() -> Result<()> {
                 Config::load(arguments.config.as_deref()).context("configuration is invalid")?;
                 println!("configuration is valid");
             }
+            Some(ServerCommand::Doctor) => {
+                let config = Config::load(arguments.config.as_deref())
+                    .context("load Record Store configuration")?;
+                std::process::exit(doctor(&config, json));
+            }
+            Some(ServerCommand::Backup {
+                output,
+                replace_incomplete,
+            }) => {
+                let config = Config::load(arguments.config.as_deref())
+                    .context("load Record Store configuration")?;
+                std::process::exit(run_backup(&config, &output, replace_incomplete, json));
+            }
+            Some(ServerCommand::VerifyBackup { input, level }) => {
+                // A backup is often checked on a machine that is not the
+                // deployment, where no root credentials are set and a full
+                // configuration cannot load. That must not stop the check, so a
+                // missing configuration only costs the key comparison.
+                let master_key =
+                    Config::load(arguments.config.as_deref())
+                        .ok()
+                        .and_then(|config| {
+                            config
+                                .auth
+                                .credential_master_key
+                                .as_ref()
+                                .map(|key| key.expose().as_bytes().to_vec())
+                        });
+                std::process::exit(run_verify_backup(
+                    &input,
+                    &level,
+                    master_key.as_deref(),
+                    json,
+                ));
+            }
+            Some(ServerCommand::Restore { input, level }) => {
+                let config = Config::load(arguments.config.as_deref())
+                    .context("load Record Store configuration")?;
+                std::process::exit(run_restore(&config, &input, &level, json));
+            }
             Some(ServerCommand::BackupMetadata { output }) => {
                 let config = Config::load(arguments.config.as_deref())
                     .context("load Record Store configuration")?;
+                eprintln!(
+                    "warning: backup-metadata copies metadata only. `record-store server backup` \
+                     also copies payloads and system records, which a restore needs."
+                );
                 record_store_server::backup_metadata(&config, &output)
                     .context("back up Record Store metadata")?;
                 println!("metadata backup created at {}", output.display());
@@ -749,6 +1044,10 @@ async fn main() -> Result<()> {
             Some(ServerCommand::RestoreMetadata { input }) => {
                 let config = Config::load(arguments.config.as_deref())
                     .context("load Record Store configuration")?;
+                eprintln!(
+                    "warning: restore-metadata restores metadata only. `record-store server \
+                     restore` also restores payloads and system records."
+                );
                 record_store_server::restore_metadata(&config, &input)
                     .context("restore Record Store metadata")?;
                 println!("metadata restored from {}", input.display());
@@ -2078,6 +2377,73 @@ mod tests {
             arguments.command.is_none(),
             "bare `server` must not select a subcommand"
         );
+    }
+
+    /// The maintenance commands are what a backup script drives, so their
+    /// arguments and defaults are pinned here rather than discovered at 3am.
+    #[test]
+    fn the_maintenance_commands_parse_with_safe_defaults() {
+        let Command::Server(doctor) = parse(&["record-store", "server", "doctor"]).command else {
+            panic!("expected the server command");
+        };
+        assert!(matches!(doctor.command, Some(ServerCommand::Doctor)));
+
+        let Command::Server(backup) =
+            parse(&["record-store", "server", "backup", "/backups/today"]).command
+        else {
+            panic!("expected the server command");
+        };
+        let Some(ServerCommand::Backup {
+            output,
+            replace_incomplete,
+        }) = backup.command
+        else {
+            panic!("expected the backup subcommand");
+        };
+        assert_eq!(output, *std::path::Path::new("/backups/today"));
+        assert!(
+            !replace_incomplete,
+            "replacing an earlier attempt has to be asked for explicitly"
+        );
+
+        let Command::Server(verify) =
+            parse(&["record-store", "server", "verify-backup", "/backups/today"]).command
+        else {
+            panic!("expected the server command");
+        };
+        let Some(ServerCommand::VerifyBackup { level, .. }) = verify.command else {
+            panic!("expected the verify-backup subcommand");
+        };
+        assert_eq!(
+            level, "checksums",
+            "the default must read the bytes, not just the manifest"
+        );
+
+        let Command::Server(restore) =
+            parse(&["record-store", "server", "restore", "/backups/today"]).command
+        else {
+            panic!("expected the server command");
+        };
+        let Some(ServerCommand::Restore { level, .. }) = restore.command else {
+            panic!("expected the restore subcommand");
+        };
+        assert_eq!(level, "checksums");
+    }
+
+    /// An unknown level has to be refused rather than quietly downgraded to the
+    /// cheapest check.
+    #[test]
+    fn an_unrecognized_verification_level_is_not_silently_accepted() {
+        assert!(record_store_server::backup::VerificationLevel::parse("thorough").is_none());
+        for level in ["manifest", "checksums", "full"] {
+            assert_eq!(
+                record_store_server::backup::VerificationLevel::parse(level)
+                    .expect("a documented level")
+                    .as_str(),
+                level,
+                "a level must report itself by the name it was asked for"
+            );
+        }
     }
 
     #[test]

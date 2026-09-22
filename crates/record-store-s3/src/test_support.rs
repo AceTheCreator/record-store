@@ -79,6 +79,7 @@ async fn test_state() -> (TempDir, S3State, Arc<CredentialManager>) {
         OrganizationId::new(),
         ServiceLimits {
             maximum_concurrent_operations: 16,
+            admission_wait_limit_seconds: 5,
             maximum_custom_metadata_entries: 8,
             maximum_custom_metadata_bytes: 1_024,
             object_lock: ObjectLockLimits::default(),

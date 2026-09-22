@@ -69,22 +69,50 @@ record-store server --config /etc/record-store/config.toml check-config
 Loads the file, applies the environment, validates, and exits. Binds nothing and writes
 nothing.
 
-### `server backup-metadata`
+### `server doctor`
 
 ```bash
-record-store server backup-metadata /backups/2026-08-29
+record-store server --config /etc/record-store/config.toml doctor
 ```
 
+Reports whether this machine can run the configured deployment: the data directory and
+its permissions, whether the temporary directory allows atomic publication, the on-disk
+storage format, free space, the configured addresses, and which key material is
+present. Starts nothing, opens no database, prints no secret value.
+
+Exits 0 when nothing failed and 7 when something did. `--json` emits the report.
+
+### `server backup`
+
+```bash
+record-store server backup /backups/2026-09-22 [--replace-incomplete]
+```
+
+Copies payloads, metadata, and system records into one destination with a manifest.
 Takes the exclusive data lock, so **the server must be stopped**. The destination must
-not already exist.
+be empty or absent; a destination holding a completed backup is never overwritten.
 
-### `server restore-metadata`
+### `server verify-backup`
 
 ```bash
-record-store server restore-metadata /backups/2026-08-29
+record-store server verify-backup /backups/2026-09-22 --level full
 ```
 
-Requires an empty `metadata/` directory and verifies every checksum. See
+Checks a backup without restoring it, at level `manifest`, `checksums` (the default),
+or `full`. Exits 3 when the backup is not usable.
+
+### `server restore`
+
+```bash
+record-store server restore /backups/2026-09-22 --level full
+```
+
+Verifies the backup, then stages and restores every component into an empty data
+directory. Refuses to write into a data directory that already holds one.
+
+### `server backup-metadata`, `server restore-metadata`
+
+Deprecated. They copy metadata only, and warn on use. See
 [Backup and Restore](../operations/backup-and-restore.md).
 
 ## `status`

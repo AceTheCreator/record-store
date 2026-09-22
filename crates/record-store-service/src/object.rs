@@ -14,7 +14,6 @@ use record_store_storage::{
     DeleteObjectRequest, DeleteObjectVersionRequest, GetObjectRequest, GetObjectVersionRequest,
     HeadObjectRequest, ObjectStore, PutObjectRequest, PutObjectResult, StorageError,
 };
-use tokio::sync::Semaphore;
 
 use crate::error::map_storage;
 use crate::lock::LockPolicy;
@@ -26,7 +25,7 @@ pub struct ObjectService {
     pub(crate) storage: Arc<dyn ObjectStore>,
     pub(crate) metadata: Arc<dyn MetadataRepository>,
     pub(crate) coordinator: Arc<BucketCoordinator>,
-    pub(crate) operations: Arc<Semaphore>,
+    pub(crate) admission: Arc<crate::admission::Admission>,
     pub(crate) metrics: Arc<ServiceMetrics>,
     pub(crate) maximum_custom_metadata_entries: usize,
     pub(crate) maximum_custom_metadata_bytes: usize,

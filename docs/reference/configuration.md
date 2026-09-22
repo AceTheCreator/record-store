@@ -59,6 +59,11 @@ rate limits and audit records all name the proxy. See
 | `temporary_directory` | path | `<data_directory>/tmp` | `RECORD_STORE_STORAGE_TEMPORARY_DIRECTORY` |
 | `encryption_enabled` | boolean | `false` | `RECORD_STORE_STORAGE_ENCRYPTION_ENABLED` |
 
+`temporary_directory` must be on the same filesystem as the data directory. A payload
+is published by renaming it out of there, and a rename cannot cross a mount boundary.
+`record-store server doctor` and start-up both refuse a deployment that gets this
+wrong, rather than letting it fail on the first upload.
+
 `encryption_enabled` requires `auth.credential_master_key`. It applies to newly
 committed payloads; it does not re-encrypt existing objects. See
 [Encryption](../security/encryption.md).
@@ -97,11 +102,19 @@ Constraints:
 | Key | Type | Default | Environment |
 | --- | --- | --- | --- |
 | `maximum_concurrent_operations` | integer > 0 | `256` | `RECORD_STORE_MAX_CONCURRENT_OPERATIONS` |
+| `admission_wait_limit_seconds` | integer 1–300 | `15` | `RECORD_STORE_ADMISSION_WAIT_LIMIT_SECONDS` |
 | `maximum_custom_metadata_entries` | integer ≤ 1024 | `64` | — |
 | `maximum_custom_metadata_bytes` | integer 1–1048576 | `16384` | — |
 | `maximum_header_bytes` | integer 1024–1048576 | `65536` | `RECORD_STORE_MAX_HEADER_BYTES` |
 
 `maximum_custom_metadata_*` bound `x-amz-meta-*` on a single object.
+
+`maximum_concurrent_operations` bounds the work in flight;
+`admission_wait_limit_seconds` bounds the work waiting to be. An operation that waits
+longer than the limit is refused with `SlowDown` over S3 and `TOO_MANY_OPERATIONS`
+over the management API, both `503` and both retryable, and counted by
+`record_store_operations_rejected_total`. Without the second limit the first one only
+moves unbounded growth from memory in flight to a queue nothing measures.
 
 ## `[webhooks]`
 
@@ -205,6 +218,7 @@ encryption_enabled = true
 
 [limits]
 maximum_concurrent_operations = 256
+admission_wait_limit_seconds = 15
 maximum_header_bytes = 65536
 
 [webhooks]

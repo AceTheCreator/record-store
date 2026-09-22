@@ -22,6 +22,7 @@ mod types;
 mod test_support;
 
 pub use device_store::DeviceStore;
+pub use encryption::object_key_reference;
 pub use error::StorageError;
 pub use local_store::LocalFilesystemStore;
 pub use object_store::ObjectStore;

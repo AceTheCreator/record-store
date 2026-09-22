@@ -81,6 +81,12 @@ impl Config {
             self.limits.maximum_concurrent_operations =
                 parse_environment("RECORD_STORE_MAX_CONCURRENT_OPERATIONS", value)?;
         }
+        if let Some(value) =
+            environment_value(environment, "RECORD_STORE_ADMISSION_WAIT_LIMIT_SECONDS")?
+        {
+            self.limits.admission_wait_limit_seconds =
+                parse_environment("RECORD_STORE_ADMISSION_WAIT_LIMIT_SECONDS", value)?;
+        }
         if let Some(value) = environment_value(environment, "RECORD_STORE_MAX_HEADER_BYTES")? {
             self.limits.maximum_header_bytes =
                 parse_environment("RECORD_STORE_MAX_HEADER_BYTES", value)?;
@@ -476,6 +482,7 @@ mod exhaustive_tests {
                 "metrics-token-at-least-thirty-two-byte".into(),
             ),
             ("RECORD_STORE_MAX_CONCURRENT_OPERATIONS", "64".into()),
+            ("RECORD_STORE_ADMISSION_WAIT_LIMIT_SECONDS", "20".into()),
             ("RECORD_STORE_MAX_HEADER_BYTES", "32768".into()),
             ("RECORD_STORE_WEBHOOK_ALLOW_HTTP", "true".into()),
             ("RECORD_STORE_WEBHOOK_ALLOW_PRIVATE_NETWORKS", "true".into()),
@@ -621,6 +628,7 @@ mod exhaustive_tests {
         assert!(config.auth.metrics_scrape_token.is_some());
 
         assert_eq!(config.limits.maximum_concurrent_operations, 64);
+        assert_eq!(config.limits.admission_wait_limit_seconds, 20);
         assert_eq!(config.limits.maximum_header_bytes, 32_768);
 
         assert!(config.webhooks.allow_http);

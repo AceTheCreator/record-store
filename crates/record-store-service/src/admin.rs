@@ -1,9 +1,6 @@
 //! Shared bucket and object application services.
 
-use std::{
-    io,
-    sync::{Arc, atomic::Ordering},
-};
+use std::{io, sync::atomic::Ordering};
 
 use futures_util::TryStreamExt;
 use record_store_core::{
@@ -275,11 +272,8 @@ impl ObjectService {
             .ok_or(ServiceError::BucketNotFound)
     }
 
-    pub(crate) async fn acquire(&self) -> Result<tokio::sync::OwnedSemaphorePermit, ServiceError> {
-        Arc::clone(&self.operations)
-            .acquire_owned()
-            .await
-            .map_err(|_| ServiceError::Unavailable)
+    pub(crate) async fn acquire(&self) -> Result<crate::admission::OperationPermit, ServiceError> {
+        self.admission.acquire().await
     }
 }
 
@@ -294,6 +288,7 @@ mod tests {
     fn limits(entries: usize, bytes: usize) -> ServiceLimits {
         ServiceLimits {
             maximum_concurrent_operations: 4,
+            admission_wait_limit_seconds: 5,
             maximum_custom_metadata_entries: entries,
             maximum_custom_metadata_bytes: bytes,
             object_lock: crate::ObjectLockLimits::default(),
