@@ -134,7 +134,12 @@ impl Deployment {
         response.json().await.expect("share JSON")
     }
 
-    async fn create_service_account(&self, name: &str) -> Value {
+    /// Creates a service account and returns only its identifier.
+    ///
+    /// The creation response carries the account's one-time secret access key.
+    /// Nothing in these tests needs it, and a value that never leaves this
+    /// function cannot end up in a panic message or a CI log.
+    async fn create_service_account(&self, name: &str) -> String {
         let response = self
             .client
             .post(self.url("/api/v1/service-accounts"))
@@ -148,7 +153,11 @@ impl Deployment {
             StatusCode::CREATED,
             "creating a service account"
         );
-        response.json().await.expect("service account JSON")
+        let issued: Value = response.json().await.expect("service account JSON");
+        issued["account"]["id"]
+            .as_str()
+            .expect("a created account has an identifier")
+            .to_owned()
     }
 
     async fn create_lifecycle_rule(&self, bucket: &str, prefix: &str, days: u32) {
@@ -197,7 +206,7 @@ fn config_for(data_directory: std::path::PathBuf) -> Config {
 }
 
 /// Builds a deployment with something of every kind worth losing in it.
-async fn populated_deployment(directory: &TempDir, encrypted: bool) -> (Config, Value, String) {
+async fn populated_deployment(directory: &TempDir, encrypted: bool) -> (Config, String, String) {
     let mut config = config_for(directory.path().join("source"));
     config.storage.encryption_enabled = encrypted;
     let deployment = Deployment::start(&config).await;
@@ -218,7 +227,7 @@ async fn populated_deployment(directory: &TempDir, encrypted: bool) -> (Config, 
         .create_lifecycle_rule("records", "deep/", 90)
         .await;
     let share = deployment.create_share("records", "notes.txt").await;
-    let account = deployment.create_service_account("restore-drill").await;
+    let account_id = deployment.create_service_account("restore-drill").await;
     let token = share["url"]
         .as_str()
         .expect("share URL")
@@ -228,7 +237,7 @@ async fn populated_deployment(directory: &TempDir, encrypted: bool) -> (Config, 
         .to_owned();
 
     deployment.stop().await;
-    (config, account, token)
+    (config, account_id, token)
 }
 
 /// The acceptance test for the whole feature: everything that mattered before
@@ -237,7 +246,7 @@ async fn populated_deployment(directory: &TempDir, encrypted: bool) -> (Config, 
 #[tokio::test]
 async fn a_restored_deployment_serves_the_same_objects_versions_shares_and_accounts() {
     let directory = tempdir().expect("temporary directory");
-    let (source_config, account, share_token) = populated_deployment(&directory, false).await;
+    let (source_config, account_id, share_token) = populated_deployment(&directory, false).await;
 
     let backup_directory = directory.path().join("backup");
     let report = backup::backup(&source_config, &backup_directory, false).expect("take a backup");
@@ -291,15 +300,22 @@ async fn a_restored_deployment_serves_the_same_objects_versions_shares_and_accou
     );
 
     let accounts = restored.get_json("/api/v1/service-accounts").await;
-    let names: Vec<&str> = accounts
+    let restored_accounts: Vec<(&str, &str)> = accounts
         .as_array()
         .expect("account list")
         .iter()
-        .filter_map(|entry| entry["account"]["name"].as_str())
+        .filter_map(|entry| {
+            Some((
+                entry["account"]["id"].as_str()?,
+                entry["account"]["name"].as_str()?,
+            ))
+        })
         .collect();
     assert!(
-        names.contains(&"restore-drill"),
-        "service accounts are deployment state: {names:?} (created {account:?})"
+        restored_accounts
+            .iter()
+            .any(|(id, name)| *id == account_id && *name == "restore-drill"),
+        "service accounts are deployment state: {restored_accounts:?} does not contain {account_id}"
     );
 
     assert_eq!(
